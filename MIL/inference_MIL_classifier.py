@@ -63,7 +63,7 @@ def run_eval(run_path, args, device):
     print_network(model)
 
     # Load best model checkpoint
-    checkpoint = torch.load(os.path.join(run_path, 'best_model.pth'), map_location='cpu')
+    checkpoint = torch.load(os.path.join(run_path, 'best_model.pth'), map_location='cpu', weights_only=False)
     model.load_state_dict(checkpoint['model'], strict=False)
     
     # Set the model to evaluation mode

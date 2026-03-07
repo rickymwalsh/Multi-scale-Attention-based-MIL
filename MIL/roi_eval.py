@@ -1004,7 +1004,7 @@ def run_roi_eval(directory, args, device):
     model.to(device)
 
     # Load checkpoint and set model to eval mode
-    checkpoint = torch.load(os.path.join(directory, 'best_model.pth'), map_location='cpu')
+    checkpoint = torch.load(os.path.join(directory, 'best_model.pth'), map_location='cpu', weights_only=False)
     model.load_state_dict(checkpoint['model'], strict=False)
     model.eval()
 

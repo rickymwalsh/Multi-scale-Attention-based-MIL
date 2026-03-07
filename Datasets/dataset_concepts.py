@@ -162,10 +162,10 @@ class Generic_MIL_Dataset(Dataset):
 
         # Load patch features tensor
         if feat_pyramid_level is None:
-            x = torch.load(os.path.join(bag_dir, 'patch_features.pt'))
+            x = torch.load(os.path.join(bag_dir, 'patch_features.pt'), weights_only=False)
             
         else: 
-            x = torch.load(os.path.join(bag_dir, f'{feat_pyramid_level}_patch_features.pt'))
+            x = torch.load(os.path.join(bag_dir, f'{feat_pyramid_level}_patch_features.pt'), weights_only=False)
 
         # Load patch coordinates from HDF5 file
         with h5py.File(os.path.join(bag_dir, 'info_patches.h5'), 'r') as file:
@@ -381,10 +381,10 @@ class Generic_MIL_Dataset_Detection(Dataset):
         # Load the patch features tensor 
         if feat_pyramid_level is None:
             # patch-based MIL models
-            x = torch.load(os.path.join(bag_dir, 'patch_features.pt'))
+            x = torch.load(os.path.join(bag_dir, 'patch_features.pt'), weights_only=False)
         else: 
             # FPN-based MIL model 
-            x = torch.load(os.path.join(bag_dir, f'{feat_pyramid_level}_patch_features.pt')) 
+            x = torch.load(os.path.join(bag_dir, f'{feat_pyramid_level}_patch_features.pt'), weights_only=False) 
         
         # Load patch coordinate info from H5 file
         with h5py.File(os.path.join(bag_dir, 'info_patches.h5'), 'r') as file:
