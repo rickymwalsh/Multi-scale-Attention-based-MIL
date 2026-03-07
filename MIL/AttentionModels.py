@@ -75,7 +75,7 @@ class SetAttentionBlock(nn.Module):
         return (f'{self.__class__.__name__}({self.mab.dim_Q}, '
                 f'd_hidden = {self.mab.dim_V}, '
                 f'heads={self.mab.num_heads}, '
-                f'layer_norm={self.mab.ln0 is not None}, '
+                f'layer_norm={getattr(self.mab, "ln0", None) is not None}, '
                 f'activation={self.mab.activation})')
 
 
@@ -101,7 +101,7 @@ class InducedSetAttentionBlock(nn.Module):
                 f'd_hidden = {self.mab1.dim_V}, '
                 f'num_induced_points={self.I.size(1)}, '
                 f'heads={self.mab1.num_heads}, '
-                f'layer_norm={self.mab1.ln0 is not None}, ' 
+                f'layer_norm={getattr(self.mab1, "ln0", None) is not None}, ' 
                 f'activation={self.mab1.activation})')
 
 class PoolingByMultiheadAttention(nn.Module):
@@ -127,7 +127,7 @@ class PoolingByMultiheadAttention(nn.Module):
         return (f'{self.__class__.__name__}({self.S.size(2)}, '
                 f'num_seed_points={self.S.size(1)}, '
                 f'heads={self.mab.num_heads}, '
-                f'layer_norm={self.mab.ln0 is not None}, ' 
+                f'layer_norm={getattr(self.mab, "ln0", None) is not None}, ' 
                 f'activation={self.mab.activation})')
 
 

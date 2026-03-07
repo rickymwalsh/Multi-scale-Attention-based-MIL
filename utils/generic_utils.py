@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 import gc 
 
+import h5py
 import nltk
 import numpy as np
 import pandas as pd

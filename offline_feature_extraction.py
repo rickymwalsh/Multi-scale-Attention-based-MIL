@@ -54,8 +54,8 @@ def config():
     parser.add_argument('--model-type', default="Classifier", type=str, help='Model task type')
     parser.add_argument("--arch", default="upmc_breast_clip_det_b5_period_n_ft", type=str,
         help="For b5 classification, [upmc_breast_clip_det_b5_period_n_lp for linear probe and  upmc_breast_clip_det_b5_period_n_ft for finetuning]. "
-             "For b2 classification, [upmc_breast_clip_det_b2_period_n_lp for linear probe and  upmc_breast_clip_det_b2_period_n_ft for finetuning].", help="Model architecture name")
-    parser.add_argument("--swin_encoder", default="microsoft/swin-tiny-patch4-window7-224", type=str, help="Swin Transformer model identifier"))
+             "For b2 classification, [upmc_breast_clip_det_b2_period_n_lp for linear probe and  upmc_breast_clip_det_b2_period_n_ft for finetuning].")
+    parser.add_argument("--swin_encoder", default="microsoft/swin-tiny-patch4-window7-224", type=str, help="Swin Transformer model identifier")
     parser.add_argument("--pretrained_swin_encoder", default="y", type=str, help="Whether Swin encoder is pretrained (y/n)")
     parser.add_argument("--swin_model_type", default="y", type=str)
     
@@ -118,7 +118,7 @@ def main(args):
     print(args.df.columns)
         
     # ------ Load Mammo-CLIP Model ------
-    ckpt = torch.load(args.clip_chk_pt_path, map_location="cpu")
+    ckpt = torch.load(args.clip_chk_pt_path, map_location="cpu", weights_only=False)
     args.image_encoder_type = ckpt["config"]["model"]["image_encoder"]["name"]
 
     print(ckpt["config"]["model"]["image_encoder"])

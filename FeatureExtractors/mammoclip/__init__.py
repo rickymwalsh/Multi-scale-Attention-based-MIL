@@ -41,7 +41,7 @@ def load_image_encoder(config_image_encoder: Dict, multi_scale = False):
             config_image_encoder["source"].lower() == "cnn" and
             config_image_encoder["name"].lower() == "tf_efficientnet_b5_ns-detect"
     ):
-        _image_encoder = EfficientNet.from_pretrained("efficientnet-b5", num_classes=1)
+        _image_encoder = EfficientNet.from_pretrained("efficientnet-b5", num_classes=1, multi_scale=multi_scale)
         _image_encoder.out_dim = 2048
         
     elif (

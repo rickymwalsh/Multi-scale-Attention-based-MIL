@@ -209,10 +209,12 @@ def initialize_training_setup(train_loader, model, device, args):
     scaler = torch.cuda.amp.GradScaler()
 
     # Loss Function Setup
-    pos_wt = torch.tensor([args.BCE_weights]).to('cuda') 
-    print(f'pos_wt: {pos_wt}') 
-
-    train_criterion = torch.nn.BCEWithLogitsLoss(reduction='mean', pos_weight =pos_wt) if args.weighted_BCE == "y" else torch.nn.BCEWithLogitsLoss()
+    if args.weighted_BCE == "y":
+        pos_wt = torch.tensor([args.BCE_weights]).to('cuda')
+        print(f'pos_wt: {pos_wt}')
+        train_criterion = torch.nn.BCEWithLogitsLoss(reduction='mean', pos_weight=pos_wt)
+    else:
+        train_criterion = torch.nn.BCEWithLogitsLoss()
     eval_criterion = train_criterion 
 
     return optimizer, scheduler, scaler, train_criterion, eval_criterion
