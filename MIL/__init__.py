@@ -17,11 +17,12 @@ def build_model(args):
             
             feature_extractor = FeaturePyramidNetwork(
                 backbone=None, 
-                scales=args.scales,                            
-                out_channels=args.fpn_dim,                           
-                top_down_pathway = True if args.multi_scale_model == 'fpn' else False,                                    
-                upsample_method = args.upsample_method,      
-                norm_layer = args.norm_fpn
+                scales=args.scales,
+                out_channels=args.fpn_dim,
+                in_channels_list=args.fpn_in_channels,
+                top_down_pathway=True if args.multi_scale_model == 'fpn' else False,
+                upsample_method=args.upsample_method,
+                norm_layer=args.norm_fpn
             )
                 
             num_chs = args.fpn_dim 

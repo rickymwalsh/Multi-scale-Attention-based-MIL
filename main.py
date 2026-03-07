@@ -7,7 +7,6 @@ from utils.generic_utils import seed_all
 #external imports 
 import warnings
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import torch
 
 warnings.filterwarnings("ignore")
@@ -86,6 +85,9 @@ def config():
     parser.add_argument('--scales', type=int,  nargs='*',  default=(16, 32, 64, 128), help="List of scales to use for the multi-scale model.")
 
     parser.add_argument('--fpn_dim', type=int, default=256)
+    parser.add_argument('--fpn_in_channels', type=int, nargs='+', default=None,
+                        help='Input channel sizes for FPN lateral convolutions (C4, C5). '
+                             'Defaults to [120, 352] for B2; use [128, 176] for B5.')
     parser.add_argument('--upsample_method', type = str, choices = ['bilinear', 'nearest'], default = 'nearest')
     parser.add_argument('--norm_fpn', type = bool, default = False)
     

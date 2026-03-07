@@ -27,6 +27,7 @@ class FeaturePyramidNetwork(nn.Module):
         backbone, 
         scales, 
         out_channels: int,
+        in_channels_list: Optional[list] = None,
         top_down_pathway: bool = True,
         upsample_method: str = 'nearest', 
         norm_layer: Optional[Callable[..., nn.Module]] = None
@@ -37,7 +38,9 @@ class FeaturePyramidNetwork(nn.Module):
         self.upsample_method = upsample_method
 
         self.backbone = backbone
-        in_channels_list = [120, 352]
+        # Default to B2 channels [120, 352]; pass [128, 176] for B5.
+        if in_channels_list is None:
+            in_channels_list = [120, 352]
         
         if norm_layer: 
             norm_layer = nn.GroupNorm(num_groups = 1, num_channels = out_channels)
