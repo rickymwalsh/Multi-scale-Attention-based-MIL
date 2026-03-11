@@ -126,29 +126,132 @@ class Generic_MIL_Dataset(Dataset):
         self.args = args
         self.df = df
 
-        if args.multi_scale_model is None: 
-            # single-scale mil models 
+        if args.multi_scale_model is None:
+            # single-scale mil models
             self.dir_path = args.data_dir / args.feat_dir / f'patch_size-{args.scales[0]}' if args.feature_extraction == 'offline' else args.data_dir / args.img_dir
-            
-        elif args.multi_scale_model == 'msp': 
-            # multi-scale patch-based mil models 
-            self.dir_path = args.data_dir / args.feat_dir 
-            
-        elif args.multi_scale_model in ['fpn', 'backbone_pyramid']: 
+
+        elif args.multi_scale_model == 'msp':
+            # multi-scale patch-based mil models
+            self.dir_path = args.data_dir / args.feat_dir
+
+        elif args.multi_scale_model in ['fpn', 'backbone_pyramid']:
             self.dir_path = args.data_dir / args.feat_dir / 'multi_scale' if args.feature_extraction == 'offline' else args.data_dir / args.img_dir
 
         self.split = split
         self.dataset = args.dataset
         self.label = args.label
-        self.transform = transform 
+        self.transform = transform
 
-        self.multi_scale_model = args.multi_scale_model 
-        self.scales = args.scales 
-        
+        self.multi_scale_model = args.multi_scale_model
+        self.scales = args.scales
+
+        # Preload training/val features into memory to avoid per-batch file I/O.
+        self._cache = None
+        if split in ['train', 'val'] and self.transform is None and args.feature_extraction == 'offline':
+            self._preload_features()
+
+    def _ensure_sorted_file(self, bag_dir, feat_pyramid_level=None):
+        """Return path to a pre-sorted feature file, creating it if it does not exist.
+
+        The sorted file is saved alongside the original feature file as
+        ``{prefix}patch_features_sorted.pt``.  The write is performed via a
+        temporary file followed by an atomic ``os.rename()`` so that two
+        concurrent processes racing to create the same file cannot produce a
+        corrupt result.
+        """
+        import pathlib
+        bag_dir = pathlib.Path(bag_dir)
+        prefix = f'{feat_pyramid_level}_' if feat_pyramid_level else ''
+        sorted_path = bag_dir / f'{prefix}patch_features_sorted.pt'
+        if sorted_path.exists():
+            # Check dtype: existing float32 sorted files (from old code) must be
+            # recreated as float16 to halve DRAM and PCIe bandwidth.
+            try:
+                _existing = torch.load(sorted_path, mmap=True, weights_only=True)
+            except TypeError:
+                _existing = torch.load(sorted_path, weights_only=True)
+            if _existing.dtype == torch.float16:
+                return sorted_path
+            # float32 sorted file found — fall through to recreate as float16
+
+        # Load original features and sort by patch coordinates.
+        orig_path = bag_dir / f'{prefix}patch_features.pt'
+        x = torch.load(orig_path, weights_only=True)
+        coords_path = bag_dir / 'info_patches.h5'
+        with h5py.File(coords_path, 'r') as _f:
+            bag_coords = np.array(_f['coords'])
+        sorted_indices = np.lexsort((bag_coords[:, 0], bag_coords[:, 1]))
+        x_sorted = x[sorted_indices].half()  # cast to float16: halves DRAM/PCIe bandwidth
+
+        # Write atomically: another process may win the race, which is fine
+        # because both produce the identical tensor.
+        tmp_path = sorted_path.with_suffix('.pt.tmp')
+        torch.save(x_sorted, tmp_path)
+        os.replace(str(tmp_path), str(sorted_path))  # atomic on POSIX
+        return sorted_path
+
+    def _load_sorted_mmap(self, bag_dir, feat_pyramid_level=None):
+        """Load a pre-sorted feature file as a file-backed mmap tensor.
+
+        Two processes that open the same file with ``mmap=True`` share the
+        same physical pages via the OS page cache, halving DRAM bandwidth
+        when two training jobs run concurrently.  We intentionally do NOT
+        call ``posix_fadvise(DONTNEED)`` here — keeping pages resident is
+        what enables sharing.
+
+        Falls back to a regular heap load on PyTorch < 2.1 where the
+        ``mmap`` keyword is not available (no sharing benefit, but no crash).
+        """
+        sorted_path = self._ensure_sorted_file(bag_dir, feat_pyramid_level)
+        try:
+            return torch.load(sorted_path, mmap=True, weights_only=True)
+        except TypeError:
+            # mmap kwarg unavailable (PyTorch < 2.1)
+            return torch.load(sorted_path, weights_only=True)
+
+    def _preload_features(self):
+        """Load all pre-extracted features into memory once at startup."""
+        print(f"Preloading {len(self.df)} samples into memory...")
+        self._cache = [None] * len(self.df)
+        for idx in range(len(self.df)):
+            row = self.df.iloc[idx]
+            patient_id = str(row['patient_id'])
+            image_id = str(row['image_id'])
+
+            if self.multi_scale_model is None:
+                bag_dir = self.dir_path / patient_id / image_id
+                x = self._load_sorted_mmap(bag_dir)
+
+            elif self.multi_scale_model == 'msp':
+                x = {}
+                for scale in self.scales:
+                    bag_dir = self.dir_path / f'patch_size-{scale}' / patient_id / image_id
+                    x[scale] = self._load_sorted_mmap(bag_dir)
+
+            elif self.multi_scale_model in ['fpn', 'backbone_pyramid']:
+                bag_dir = self.dir_path / patient_id / image_id
+                c4 = self._load_sorted_mmap(bag_dir, feat_pyramid_level='C4')
+                c5 = self._load_sorted_mmap(bag_dir, feat_pyramid_level='C5')
+                x = [c4, c5]
+
+            label = torch.tensor(row[self.label], dtype=torch.long)
+            self._cache[idx] = (x, label)
+
+            if (idx + 1) % 2000 == 0:
+                print(f"  Preloaded {idx + 1}/{len(self.df)} samples")
+
+        print(f"Preloading complete ({len(self.df)} samples)")
+        # Freeze all preloaded objects so Python's GC never scans them again.
+        # Without this, Gen2 GC cycles scan all ~2×N tensor objects each time,
+        # and get progressively slower as optimizer state grows into old generations.
+        import gc as _gc
+        _gc.collect()
+        _gc.freeze()
+
     def __len__(self):
         return len(self.df)
 
-    def load_data(self, bag_dir, feat_pyramid_level = None): 
+    def load_data(self, bag_dir, feat_pyramid_level = None):
         """
         Load pre-extracted instance features and sort them by patch coordinates.
 
@@ -162,73 +265,101 @@ class Generic_MIL_Dataset(Dataset):
 
         # Load patch features tensor
         if feat_pyramid_level is None:
-            x = torch.load(os.path.join(bag_dir, 'patch_features.pt'), weights_only=False)
-            
-        else: 
-            x = torch.load(os.path.join(bag_dir, f'{feat_pyramid_level}_patch_features.pt'), weights_only=False)
+            feat_path = os.path.join(bag_dir, 'patch_features.pt')
+        else:
+            feat_path = os.path.join(bag_dir, f'{feat_pyramid_level}_patch_features.pt')
+
+        x = torch.load(feat_path, weights_only=True)
 
         # Load patch coordinates from HDF5 file
-        with h5py.File(os.path.join(bag_dir, 'info_patches.h5'), 'r') as file:
-            
-            # Getting the data
-            bag_coords = np.array(file['coords']) 
+        coords_path = os.path.join(bag_dir, 'info_patches.h5')
+        with h5py.File(coords_path, 'r') as file:
+            bag_coords = np.array(file['coords'])
+
+        # Drop the coords file from page cache (h5py reads into heap numpy array,
+        # so this is always safe immediately after the with-block closes the file).
+        try:
+            with open(coords_path, 'rb') as _f:
+                os.posix_fadvise(_f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
 
         sorted_indices = np.lexsort((bag_coords[:, 0], bag_coords[:, 1]))  # Sort by y, then x
-        
+
+        # Fancy indexing always allocates a new heap-backed tensor (never a view).
+        # This ensures x is in anonymous heap memory regardless of whether torch.load()
+        # returned an mmap-backed tensor or a regular heap tensor.
         x = x[sorted_indices]
-        
+
+        # Drop the feature file from the kernel page cache NOW, after x[sorted_indices]
+        # has copied the data to heap and the original mmap storage has been freed.
+        # Calling DONTNEED before the indexing would evict the mmap pages and cause
+        # page faults on every element access during the copy — exactly the wrong order.
+        # Doing it here prevents val/test on-demand reads from accumulating in the page
+        # cache and competing with the preloaded train cache for physical RAM.
+        try:
+            with open(feat_path, 'rb') as _f:
+                os.posix_fadvise(_f.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+        except (AttributeError, OSError):
+            pass
+
         return x
-        
-        
+
+
     def __getitem__(self, idx):
+
+        # Fast path: return preloaded features
+        if self._cache is not None:
+            x, label = self._cache[idx]
+            return {'x': x, 'y': label}
 
         data = self.df.iloc[idx]
 
         if self.transform is not None:  # Online instance feature extraction mode
 
             bag_dir = self.dir_path / str(self.df.iloc[idx]['patient_id']) / str(self.df.iloc[idx]['image_id']) if self.args.dataset != 'ddsm' else data['image_file_path']
-    
+
             img = Image.open(bag_dir).convert('RGB')
-                
+
             x, bag_coords, padding = self.transform(img)
-                    
+
         else: # Offline instance feature extraction mode: load pre-extracted features from disk
 
-            if self.multi_scale_model is None: 
+            if self.multi_scale_model is None:
 
                 bag_dir = self.dir_path / str(self.df.iloc[idx]['patient_id']) / str(self.df.iloc[idx]['image_id'])
-                    
-                x = self.load_data(bag_dir) 
-                
-            elif self.multi_scale_model == 'msp': 
+
+                x = self.load_data(bag_dir)
+
+            elif self.multi_scale_model == 'msp':
                 # Multi-scale pyramid: load features for all scales
-                
-                bag_dir_small = self.dir_path / f'patch_size-{self.scales[0]}' / str(self.df.iloc[idx]['patient_id']) / str(self.df.iloc[idx]['image_id']) 
-                x_small  = self.load_data(bag_dir_small) 
-                    
+
+                bag_dir_small = self.dir_path / f'patch_size-{self.scales[0]}' / str(self.df.iloc[idx]['patient_id']) / str(self.df.iloc[idx]['image_id'])
+                x_small  = self.load_data(bag_dir_small)
+
                 bag_dir_medium = self.dir_path / f'patch_size-{self.scales[1]}' / str(self.df.iloc[idx]['patient_id']) / str(self.df.iloc[idx]['image_id'])
                 x_medium = self.load_data(bag_dir_medium)
-                    
+
                 bag_dir_large = self.dir_path / f'patch_size-{self.scales[2]}' / str(self.df.iloc[idx]['patient_id']) / str(self.df.iloc[idx]['image_id'])
                 x_large = self.load_data(bag_dir_large)
 
                 x = {
-                    self.scales[0]: x_small, 
-                    self.scales[1]: x_medium, 
+                    self.scales[0]: x_small,
+                    self.scales[1]: x_medium,
                     self.scales[2]: x_large
                 }
-            
-            elif self.multi_scale_model in ['fpn', 'backbone_pyramid']: 
+
+            elif self.multi_scale_model in ['fpn', 'backbone_pyramid']:
                 # Load specific feature pyramid levels
-                
+
                 dir_path = self.dir_path / str(self.df.iloc[idx]['patient_id']) / str(self.df.iloc[idx]['image_id'])
-                    
+
                 c4_feats = self.load_data(dir_path, feat_pyramid_level = 'C4')
-    
+
                 c5_feats = self.load_data(dir_path, feat_pyramid_level = 'C5')
-                    
-                x = [c4_feats, c5_feats] 
-                    
+
+                x = [c4_feats, c5_feats]
+
         return {
         'x': x,
         'y': torch.tensor(data[self.label], dtype=torch.long)
@@ -378,13 +509,13 @@ class Generic_MIL_Dataset_Detection(Dataset):
             bag_info: Dictionary of additional info about the patch coordinates.
         """
 
-        # Load the patch features tensor 
+        # Load the patch features tensor
         if feat_pyramid_level is None:
             # patch-based MIL models
-            x = torch.load(os.path.join(bag_dir, 'patch_features.pt'), weights_only=False)
-        else: 
-            # FPN-based MIL model 
-            x = torch.load(os.path.join(bag_dir, f'{feat_pyramid_level}_patch_features.pt'), weights_only=False) 
+            x = torch.load(os.path.join(bag_dir, 'patch_features.pt'), weights_only=True)
+        else:
+            # FPN-based MIL model
+            x = torch.load(os.path.join(bag_dir, f'{feat_pyramid_level}_patch_features.pt'), weights_only=True)
         
         # Load patch coordinate info from H5 file
         with h5py.File(os.path.join(bag_dir, 'info_patches.h5'), 'r') as file:
