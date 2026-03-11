@@ -295,7 +295,7 @@ class EmbeddingMIL(MIL):
         
     def save_patch_scores(self, A):
         """Save patch-level scores attention weights."""
-        self.patch_scores = A
+        self.patch_scores = A.detach()
         
     def get_patch_scores(self):
         """Retrieve saved patch-level attention scores."""
@@ -405,17 +405,17 @@ class PyramidalMILmodel(MIL):
         return scale_aggregator
 
     def save_patch_scores(self, A, s):
-        self.patch_scores[s] = A
-     
+        self.patch_scores[s] = A.detach()
+
     def save_scale_scores(self, A):
-        self.scale_scores = A
-        
+        self.scale_scores = A.detach()
+
     def get_patch_scores(self):
         return self.patch_scores
 
     def get_scale_scores(self):
         return self.scale_scores
-        
+
     def forward(self, x, bag_mask=None):
         
         # --- Instance Feature Extraction --- 
@@ -633,26 +633,26 @@ class NestedPyramidalMILmodel(MIL):
         return scale_aggregator
 
     def save_patch_scores(self, A, s):
-        self.patch_scores[s] = A
-     
+        self.patch_scores[s] = A.detach()
+
     def save_scale_scores(self, A):
-        self.scale_scores = A
-        
+        self.scale_scores = A.detach()
+
     def get_patch_scores(self):
         return self.patch_scores
 
     def get_scale_scores(self):
         return self.scale_scores
 
-    def get_inner_scores(self): 
-        return self.inner_scores 
+    def get_inner_scores(self):
+        return self.inner_scores
 
     def save_inner_scores(self, A, scale, region):
 
         if scale not in self.inner_scores:
             self.inner_scores[scale] = {}
-            
-        self.inner_scores[scale][region] = A
+
+        self.inner_scores[scale][region] = A.detach()
         
     def forward(self, x, bag_mask=None):
         """
