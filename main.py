@@ -1,13 +1,14 @@
-# internal imports 
+# internal imports
 from MIL.MIL_experiment import do_experiments
 from MIL.roi_eval import ROI_Eval
-from MIL.inference_MIL_classifier import Eval 
+from MIL.inference_MIL_classifier import Eval
 from utils.generic_utils import seed_all
 
-#external imports 
+#external imports
 import warnings
 import os
 import torch
+import wandb
 
 warnings.filterwarnings("ignore")
 import argparse
@@ -29,6 +30,7 @@ def config():
     parser.add_argument("--img_dir", default="VinDir_preprocessed_mammoclip/images_png", type=str, help="Path to image file")
 
     parser.add_argument('--train', action='store_true', default=False, help='Training mode.')
+    parser.add_argument('--skip_val', action='store_true', default=False, help='Skip validation each epoch (diagnostic use only).')
     parser.add_argument('--evaluation', action='store_true', default=False, help='Evaluation mode.')
     parser.add_argument('--eval_set', default='test', choices = ['val', 'test'], type=str, help="")
     
@@ -160,9 +162,15 @@ def config():
     parser.add_argument("--log-freq", default=1000, type=int)
     parser.add_argument("--running-interactive", default='n', type=str)
     parser.add_argument('--eval_scheme', default='kruns_train+val', type=str, help='Evaluation scheme [kruns_train+val | kfold_cv+test ]')
-    parser.add_argument('--resume', default = None, type = str) 
-    parser.add_argument('--test_example', default = None, type = str) 
-    
+    parser.add_argument('--resume', default = None, type = str)
+    parser.add_argument('--test_example', default = None, type = str)
+
+    # wandb
+    parser.add_argument('--wandb_project', default='msamil-vindr', type=str)
+    parser.add_argument('--wandb_entity', default=None, type=str)
+    parser.add_argument('--wandb_mode', default='online', choices=['online', 'offline', 'disabled'], type=str)
+    parser.add_argument('--wandb_name', default=None, type=str, help='wandb run name (auto-generated if None)')
+
     return parser.parse_args()
 
 
@@ -171,8 +179,8 @@ def main(args):
     seed_all(args.seed) # Fix the seed for reproducibility
     
     # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print('\ntorch.cuda.current_device():', torch.cuda.current_device())
+    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    # print('\ntorch.cuda.current_device():', torch.cuda.current_device())
     print('\nUsing device:', device)
 
     args.apex = True if args.apex == "y" else False
@@ -184,17 +192,28 @@ def main(args):
 
     torch.cuda.empty_cache() # Clean up
 
-    if args.train: 
+    if args.train:
 
-        # From MammoCLIP's work 
+        # Initialise wandb
+        run_name = args.wandb_name or f"{args.label}_{args.multi_scale_model or 'single'}_{args.pooling_type}"
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            mode=args.wandb_mode,
+            name=run_name,
+            config=vars(args),
+        )
+
+        # From MammoCLIP's work
         if args.weighted_BCE == "y" and args.dataset.lower() == "vindr" and args.label.lower() == "mass":
             args.BCE_weights = 15.573306370070778
         elif args.weighted_BCE == "y" and args.dataset.lower() == "vindr" and args.label.lower() == "suspicious_calcification":
             args.BCE_weights = 37.296728971962615
         
-        if args.mil_type: 
+        root = ''
+        if args.mil_type:
 
-            #ENCODER STAGE 
+            #ENCODER STAGE
             if args.type_mil_encoder == 'mlp': 
                 encoder_text = f'encoder_mlp-dim_{args.fcl_encoder_dim}-dropout_{args.fcl_dropout}'
             else: 
@@ -249,12 +268,13 @@ def main(args):
             f.write(args_text)
         
         do_experiments(args, device)
-        
-    elif args.evaluation: 
-        Eval(args, device) 
+        wandb.finish()
 
-    elif args.roi_eval: 
-        ROI_Eval(args, device) 
+    elif args.evaluation:
+        Eval(args, device)
+
+    elif args.roi_eval:
+        ROI_Eval(args, device)
 
 if __name__ == "__main__":
     args = config()
