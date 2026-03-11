@@ -1,4 +1,4 @@
-#external imports 
+#external imports
 import gc
 import time
 from pathlib import Path
@@ -10,6 +10,18 @@ import torch.nn.functional as F
 from sklearn.metrics import confusion_matrix
 import wandb
 from tqdm import tqdm
+
+# ── DEBUG IMPORTS (remove after debugging slowdown) ──────────────────────────
+import os
+import shutil
+import psutil
+try:
+    import pynvml as _pynvml
+    _pynvml.nvmlInit()
+    _NVML_AVAILABLE = True
+except Exception:
+    _NVML_AVAILABLE = False
+# ─────────────────────────────────────────────────────────────────────────────
 
 # internal imports 
 from Datasets.dataset_utils import MIL_dataloader
@@ -373,10 +385,10 @@ def do_experiments(args, device):
         metrics_data.to_csv(args.output_path / 'results_summary.csv', index=False)
 
 
-def k_experiment(train_df, val_df, output_path, args, device): 
+def k_experiment(train_df, val_df, output_path, args, device, train_loader=None, valid_loader=None):
     """
     Executes a single train/validation experiment.
-    
+
     Args:
         train_df (DataFrame): Training data.
         val_df (DataFrame): Validation data.
@@ -421,128 +433,299 @@ def k_experiment(train_df, val_df, output_path, args, device):
     return best_val_stats, best_model
     
 
+# ── DEBUG: system-resource snapshot (remove after debugging slowdown) ─────────
+def _log_system_stats(label: str, device: torch.device) -> None:
+    """Print a snapshot of CPU, RAM, swap, GPU memory/util, GC counts, worker
+    process RSS, and /dev/shm usage.  Called once per epoch boundary.
+    Remove this function and all call-sites once the slowdown is identified."""
+
+    sep = "=" * 70
+    print(f"\n{sep}")
+    print(f"[DEBUG RESOURCE SNAPSHOT] {label}")
+    print(sep)
+
+    # ── CPU ──────────────────────────────────────────────────────────────────
+    cpu_pct = psutil.cpu_percent(interval=0.2)          # 200 ms sample
+    cpu_count = psutil.cpu_count(logical=True)
+    print(f"  CPU utilisation : {cpu_pct:.1f}%  ({cpu_count} logical cores)")
+
+    # ── RAM ──────────────────────────────────────────────────────────────────
+    vm = psutil.virtual_memory()
+    print(f"  RAM total       : {vm.total / 2**30:.2f} GB")
+    print(f"  RAM used        : {vm.used  / 2**30:.2f} GB  ({vm.percent:.1f}%)")
+    print(f"  RAM available   : {vm.available / 2**30:.2f} GB")
+
+    # ── Swap ─────────────────────────────────────────────────────────────────
+    sw = psutil.swap_memory()
+    print(f"  Swap total      : {sw.total / 2**30:.2f} GB")
+    print(f"  Swap used       : {sw.used  / 2**30:.2f} GB  ({sw.percent:.1f}%)")
+
+    # ── /dev/shm (Linux shared memory used by DataLoader workers) ────────────
+    try:
+        shm = shutil.disk_usage('/dev/shm')
+        print(f"  /dev/shm used   : {shm.used  / 2**30:.2f} GB  "
+              f"/ {shm.total / 2**30:.2f} GB  "
+              f"({100 * shm.used / max(shm.total, 1):.1f}%)")
+        # Count lingering shared-memory files from PyTorch workers
+        shm_files = [f for f in os.listdir('/dev/shm') if f.startswith('torch_')]
+        print(f"  /dev/shm torch_ : {len(shm_files)} file(s)")
+    except OSError:
+        pass
+
+    # ── GPU ──────────────────────────────────────────────────────────────────
+    if device.type == 'cuda':
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        alloc   = torch.cuda.memory_allocated(idx)
+        peak    = torch.cuda.max_memory_allocated(idx)
+        reserved = torch.cuda.memory_reserved(idx)
+        total_gpu = torch.cuda.get_device_properties(idx).total_memory
+        print(f"  GPU [{idx}] allocated : {alloc   / 2**30:.3f} GB")
+        print(f"  GPU [{idx}] peak alloc: {peak    / 2**30:.3f} GB")
+        print(f"  GPU [{idx}] reserved  : {reserved / 2**30:.3f} GB")
+        print(f"  GPU [{idx}] total     : {total_gpu / 2**30:.3f} GB")
+        torch.cuda.reset_peak_memory_stats(idx)   # reset after each report
+
+        if _NVML_AVAILABLE:
+            try:
+                handle = _pynvml.nvmlDeviceGetHandleByIndex(idx)
+                util   = _pynvml.nvmlDeviceGetUtilizationRates(handle)
+                mem_i  = _pynvml.nvmlDeviceGetMemoryInfo(handle)
+                print(f"  GPU [{idx}] util (nvml): {util.gpu}%  "
+                      f"mem util: {util.memory}%")
+                print(f"  GPU [{idx}] mem (nvml) : "
+                      f"{mem_i.used / 2**30:.3f} / {mem_i.total / 2**30:.3f} GB")
+            except Exception as _e:
+                print(f"  GPU nvml query failed: {_e}")
+
+    # ── Python GC ────────────────────────────────────────────────────────────
+    gc_counts = gc.get_count()          # (gen0, gen1, gen2) since last collect
+    n_tracked  = len(gc.get_objects())  # total tracked objects in gen0-2
+    print(f"  GC gen counts   : gen0={gc_counts[0]}, gen1={gc_counts[1]}, "
+          f"gen2={gc_counts[2]}")
+    print(f"  GC tracked objs : {n_tracked:,}")
+    # gc.get_freeze_count() exists in CPython ≥ 3.11; fall back gracefully
+    if hasattr(gc, 'get_freeze_count'):
+        print(f"  GC frozen objs  : {gc.get_freeze_count():,}")
+
+    # ── DataLoader worker processes ───────────────────────────────────────────
+    current = psutil.Process(os.getpid())
+    children = current.children(recursive=True)
+    worker_procs = [c for c in children if 'worker' in ' '.join(c.cmdline()).lower()
+                    or c.name() in ('python', 'python3')]
+    if worker_procs:
+        total_worker_rss = sum(c.memory_info().rss for c in worker_procs)
+        print(f"  Worker procs    : {len(worker_procs)}  "
+              f"total RSS: {total_worker_rss / 2**30:.2f} GB")
+        for c in worker_procs:
+            try:
+                rss = c.memory_info().rss / 2**30
+                print(f"    PID {c.pid:6d}  RSS {rss:.2f} GB  status={c.status()}")
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    else:
+        print(f"  Worker procs    : 0 child processes found")
+
+    # ── Main process RSS ─────────────────────────────────────────────────────
+    main_rss = current.memory_info().rss
+    print(f"  Main proc RSS   : {main_rss / 2**30:.2f} GB")
+
+    print(sep + "\n")
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 def train_loop(train_loader, valid_loader, model, training_stage_manager, train_criterion, eval_criterion, optimizer, scheduler, scaler, output_path, args, device):
 
     best_aucroc = 0.
-    best_epoch = 0 
+    best_epoch = 0
+    best_val_stats = None
+    best_checkpoint_path = None
+    skip_val = getattr(args, 'skip_val', False)
 
     # Dictionaries to keep track of training and validation metrics per epoch
     train_results = {'loss': [], 'f1': [], 'bacc': [], 'auc_roc':[], 'lr':[]}
     val_results = {'loss': [], 'f1': [], 'bacc': [], 'auc_roc':[]}
-        
+
     for epoch in range(args.epochs):
 
         print(f"\n-------- Epoch {epoch + 1}/{args.epochs} --------")
-        
+
         start_time = time.time()
+
+        # ── DEBUG: snapshot before training (remove after debugging slowdown) ─
+        _log_system_stats(f"Epoch {epoch + 1}/{args.epochs} START", device)
+        # ──────────────────────────────────────────────────────────────────────
 
         if training_stage_manager is not None:
             training_stage_manager(model, optimizer, epoch, optimizer.param_groups[0]['lr'])
 
+        # Clear stale GPU attention score references from the previous epoch so the
+        # underlying tensors (and their autograd graphs) are freed before training starts.
+        if hasattr(model, 'patch_scores') and isinstance(model.patch_scores, dict):
+            model.patch_scores = {}
+        elif hasattr(model, 'patch_scores'):
+            model.patch_scores = None
+        if hasattr(model, 'scale_scores'):
+            model.scale_scores = None
+        if hasattr(model, 'inner_scores'):
+            model.inner_scores = {}
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
         # training for one epoch
         train_stats = train_fn(train_loader, model, train_criterion, optimizer, epoch, args, scheduler, scaler, device)
 
-        # validation after the epoch
-        val_stats = valid_fn(valid_loader, model, eval_criterion, args, device, split = 'val', epoch = epoch)
-    
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        if not skip_val:
+            val_stats = valid_fn(valid_loader, model, eval_criterion, args, device, split = 'val', epoch = epoch)
+
         elapsed = time.time() - start_time
 
+        # ── DEBUG: snapshot after train+val (remove after debugging slowdown) ─
+        _log_system_stats(
+            f"Epoch {epoch + 1}/{args.epochs} END  (epoch wall time: {elapsed:.1f}s)",
+            device,
+        )
+        # ──────────────────────────────────────────────────────────────────────
+
         # If using multi-scale model, report scale-specific and aggregated results
-        if args.multi_scale_model is not None: 
+        if args.multi_scale_model is not None:
             print(f"\nTrain Loss: {train_stats['loss']:.4f}")
 
-            if (args.type_scale_aggregator in ['concatenation', 'gated-attention'] and args.deep_supervision) or args.type_scale_aggregator in ['max_p', 'mean_p']: 
+            if (args.type_scale_aggregator in ['concatenation', 'gated-attention'] and args.deep_supervision) or args.type_scale_aggregator in ['max_p', 'mean_p']:
                 for s in args.scales:
                     print(f"Scale: {s} --> Train F1-Score: {train_stats[s]['f1']:.4f} | Train Bacc: {train_stats[s]['bacc']:.4f} | Train ROC-AUC: {train_stats[s]['auc_roc']:.4f}")
-                
-            print(f"Aggregated Results --> Train F1-Score: {train_stats['aggregated']['f1']:.4f} | Train Bacc: {train_stats['aggregated']['bacc']:.4f} | Train ROC-AUC: {train_stats['aggregated']['auc_roc']:.4f}")
-        
-            print(f"\nVal Loss: {val_stats['loss']:.4f}") 
 
-            if (args.type_scale_aggregator in ['concatenation', 'gated-attention'] and args.deep_supervision) or args.type_scale_aggregator in ['max_p', 'mean_p']: 
-                for s in args.scales:
-                    print(f"Scale: {s} --> Val F1-Score: {val_stats[s]['f1']:.4f} | Val Bacc: {val_stats[s]['bacc']:.4f} | Val ROC-AUC: {val_stats[s]['auc_roc']:.4f}")            
-            
-            print(f"Aggregated Results --> Val F1-Score: {val_stats['aggregated']['f1']:.4f} | Val Bacc: {val_stats['aggregated']['bacc']:.4f} | Val ROC-AUC: {val_stats['aggregated']['auc_roc']:.4f}")
-        
-            # Update results dictionary
+            print(f"Aggregated Results --> Train F1-Score: {train_stats['aggregated']['f1']:.4f} | Train Bacc: {train_stats['aggregated']['bacc']:.4f} | Train ROC-AUC: {train_stats['aggregated']['auc_roc']:.4f}")
+
+            # Update train results dictionary
             train_results['loss'].append(train_stats['loss'])
             train_results['f1'].append(train_stats['aggregated']['f1'])
             train_results['bacc'].append(train_stats['aggregated']['bacc'])
             train_results['auc_roc'].append(train_stats['aggregated']['auc_roc'])
             train_results['lr'].append(train_stats['lr'])
-                
-            val_results['loss'].append(val_stats['loss'])
-            val_results['f1'].append(val_stats['aggregated']['f1'])
-            val_results['bacc'].append(val_stats['aggregated']['bacc'])
-            val_results['auc_roc'].append(val_stats['aggregated']['auc_roc'])
 
-            # Save checkpoint if best validation ROC-AUC so far
-            if best_aucroc < val_stats['aggregated']['auc_roc']:
-                best_aucroc = val_stats['aggregated']['auc_roc']
-                best_val_stats = val_stats 
-    
-                best_epoch = epoch + 1
-                              
-                model_name = 'best_model.pth'
-                best_checkpoint_path = output_path / model_name
-                
-                print(f'\nEpoch {epoch + 1} - Save aucroc: {best_aucroc:.4f} Model')
-                    
-                torch.save(
-                    { 
-                        'model': model.state_dict(),
-                        #'predictions': val_predictions,
-                        'epoch': epoch,
-                        'auroc': val_stats['aggregated']['auc_roc'],
-                        'f1': val_stats['aggregated']['f1'], 
-                        'bacc': val_stats['aggregated']['bacc'],
-                        'dir_path': output_path
-                    }, best_checkpoint_path
-                )
+            log_dict = {
+                'train/loss': train_stats['loss'],
+                'train/auc_roc': train_stats['aggregated']['auc_roc'],
+                'train/f1': train_stats['aggregated']['f1'],
+                'train/bacc': train_stats['aggregated']['bacc'],
+                'train/lr': train_stats['lr'],
+            }
+            if (args.type_scale_aggregator in ['concatenation', 'gated-attention'] and args.deep_supervision) or args.type_scale_aggregator in ['max_p', 'mean_p']:
+                for s in args.scales:
+                    log_dict[f'train/auc_roc_scale{s}'] = train_stats[s]['auc_roc']
 
-        else: 
-            # Single scale mil models 
+            if not skip_val:
+                print(f"\nVal Loss: {val_stats['loss']:.4f}")
+
+                if (args.type_scale_aggregator in ['concatenation', 'gated-attention'] and args.deep_supervision) or args.type_scale_aggregator in ['max_p', 'mean_p']:
+                    for s in args.scales:
+                        print(f"Scale: {s} --> Val F1-Score: {val_stats[s]['f1']:.4f} | Val Bacc: {val_stats[s]['bacc']:.4f} | Val ROC-AUC: {val_stats[s]['auc_roc']:.4f}")
+
+                print(f"Aggregated Results --> Val F1-Score: {val_stats['aggregated']['f1']:.4f} | Val Bacc: {val_stats['aggregated']['bacc']:.4f} | Val ROC-AUC: {val_stats['aggregated']['auc_roc']:.4f}")
+
+                val_results['loss'].append(val_stats['loss'])
+                val_results['f1'].append(val_stats['aggregated']['f1'])
+                val_results['bacc'].append(val_stats['aggregated']['bacc'])
+                val_results['auc_roc'].append(val_stats['aggregated']['auc_roc'])
+
+                log_dict.update({
+                    'val/loss': val_stats['loss'],
+                    'val/auc_roc': val_stats['aggregated']['auc_roc'],
+                    'val/f1': val_stats['aggregated']['f1'],
+                    'val/bacc': val_stats['aggregated']['bacc'],
+                })
+                if (args.type_scale_aggregator in ['concatenation', 'gated-attention'] and args.deep_supervision) or args.type_scale_aggregator in ['max_p', 'mean_p']:
+                    for s in args.scales:
+                        log_dict[f'val/auc_roc_scale{s}'] = val_stats[s]['auc_roc']
+
+                # Save checkpoint if best validation ROC-AUC so far
+                if best_aucroc < val_stats['aggregated']['auc_roc']:
+                    best_aucroc = val_stats['aggregated']['auc_roc']
+                    best_val_stats = val_stats
+
+                    best_epoch = epoch + 1
+
+                    model_name = 'best_model.pth'
+                    best_checkpoint_path = output_path / model_name
+
+                    print(f'\nEpoch {epoch + 1} - Save aucroc: {best_aucroc:.4f} Model')
+
+                    torch.save(
+                        {
+                            'model': model.state_dict(),
+                            'epoch': epoch,
+                            'auroc': val_stats['aggregated']['auc_roc'],
+                            'f1': val_stats['aggregated']['f1'],
+                            'bacc': val_stats['aggregated']['bacc'],
+                            'dir_path': output_path
+                        }, best_checkpoint_path
+                    )
+
+            wandb.log(log_dict, step=epoch + 1)
+
+        else:
+            # Single scale mil models
 
             print(f"\nTrain Loss: {train_stats['loss']:.4f} | Train F1-Score: {train_stats['f1']:.4f} | Train Bacc: {train_stats['bacc']:.4f} | Train ROC-AUC: {train_stats['auc_roc']:.4f}")
-            
-            print(f"\nVal Loss: {val_stats['loss']:.4f} | Val F1-Score: {val_stats['f1']:.4f} | Val. Bacc: {val_stats['bacc']:.4f} | Val ROC-AUC: {val_stats['auc_roc']:.4f}\n")
-        
-            # Update results dictionary
+
+            # Update train results dictionary
             train_results['loss'].append(train_stats['loss'])
             train_results['f1'].append(train_stats['f1'])
             train_results['bacc'].append(train_stats['bacc'])
             train_results['auc_roc'].append(train_stats['auc_roc'])
             train_results['lr'].append(train_stats['lr'])
-                
-            val_results['loss'].append(val_stats['loss'])
-            val_results['f1'].append(val_stats['f1'])
-            val_results['bacc'].append(val_stats['bacc'])
-            val_results['auc_roc'].append(val_stats['auc_roc'])
 
-            # Save checkpoint if best validation ROC-AUC so far
-            if best_aucroc < val_stats['auc_roc']:
-                best_aucroc = val_stats['auc_roc']
-                best_val_stats = val_stats 
-    
-                best_epoch = epoch + 1
-                              
-                model_name = 'best_model.pth'
-                best_checkpoint_path = output_path / model_name
-                
-                print(f'Epoch {epoch + 1} - Save aucroc: {best_aucroc:.4f} Model')
-                    
-                torch.save(
-                    { 
-                        'model': model.state_dict(),
-                        #'predictions': val_predictions,
-                        'epoch': epoch,
-                        'auroc': val_stats['auc_roc'],
-                        'f1': val_stats['f1'], 
-                        'bacc': val_stats['bacc'],
-                        'dir_path': output_path
-                    }, best_checkpoint_path
-                )
+            log_dict = {
+                'train/loss': train_stats['loss'],
+                'train/auc_roc': train_stats['auc_roc'],
+                'train/f1': train_stats['f1'],
+                'train/bacc': train_stats['bacc'],
+                'train/lr': train_stats['lr'],
+            }
+
+            if not skip_val:
+                print(f"\nVal Loss: {val_stats['loss']:.4f} | Val F1-Score: {val_stats['f1']:.4f} | Val. Bacc: {val_stats['bacc']:.4f} | Val ROC-AUC: {val_stats['auc_roc']:.4f}\n")
+
+                val_results['loss'].append(val_stats['loss'])
+                val_results['f1'].append(val_stats['f1'])
+                val_results['bacc'].append(val_stats['bacc'])
+                val_results['auc_roc'].append(val_stats['auc_roc'])
+
+                log_dict.update({
+                    'val/loss': val_stats['loss'],
+                    'val/auc_roc': val_stats['auc_roc'],
+                    'val/f1': val_stats['f1'],
+                    'val/bacc': val_stats['bacc'],
+                })
+
+                # Save checkpoint if best validation ROC-AUC so far
+                if best_aucroc < val_stats['auc_roc']:
+                    best_aucroc = val_stats['auc_roc']
+                    best_val_stats = val_stats
+
+                    best_epoch = epoch + 1
+
+                    model_name = 'best_model.pth'
+                    best_checkpoint_path = output_path / model_name
+
+                    print(f'Epoch {epoch + 1} - Save aucroc: {best_aucroc:.4f} Model')
+
+                    torch.save(
+                        {
+                            'model': model.state_dict(),
+                            'epoch': epoch,
+                            'auroc': val_stats['auc_roc'],
+                            'f1': val_stats['f1'],
+                            'bacc': val_stats['bacc'],
+                            'dir_path': output_path
+                        }, best_checkpoint_path
+                    )
+
+            wandb.log(log_dict, step=epoch + 1)
 
         print(f'\nbest AUC-ROC Score at epoch {best_epoch}: {best_aucroc:.4f}')
 
@@ -592,22 +775,45 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
         
     start = time.time()
 
+    # ── DEBUG: per-step timing (remove after debugging slowdown) ─────────────
+    _DBG_PRINT_EVERY = 50          # print a timing summary every N steps
+    _dbg_t_data   = []             # time spent waiting for data (collate + pin)
+    _dbg_t_to_dev = []             # time spent on .to(device)
+    _dbg_t_fwd_bwd = []            # time for forward + backward + optim step
+    _dbg_t_cpu_post = []           # time for CPU work after optim (labels/preds copy)
+    _dbg_ram_mb = []               # main-process RSS in MB after each step
+    _dbg_t_step_wall = []          # total wall time for the step
+    _dbg_t0_iter = time.perf_counter()   # start of the first data-fetch
+    _dbg_main_proc = psutil.Process(os.getpid())
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Iterate over batches
     for step, data in progress_iter:
 
-        # Send data to device
-        if isinstance(data['x'], dict): 
-            inputs = {scale: tensor.to(device) for scale, tensor in data['x'].items()}
+        # ── DEBUG ─────────────────────────────────────────────────────────────
+        _dbg_t1 = time.perf_counter()
+        _dbg_t_data.append(_dbg_t1 - _dbg_t0_iter)   # data-fetch wall time
+        # ─────────────────────────────────────────────────────────────────────
+
+        # Send data to device; dtype=float32 converts float16 cache tensors on the GPU
+        # (fast vectorised op) while halving DRAM reads and PCIe transfer bytes.
+        if isinstance(data['x'], dict):
+            inputs = {scale: tensor.to(device, dtype=torch.float32, non_blocking=True) for scale, tensor in data['x'].items()}
             batch_size = inputs[args.scales[0]].size(0)
-        elif isinstance(data['x'], list): 
-            inputs = [tensor.to(device) for tensor in data['x']]
+        elif isinstance(data['x'], list):
+            inputs = [tensor.to(device, dtype=torch.float32, non_blocking=True) for tensor in data['x']]
             batch_size = inputs[0].size(0)
-        else: 
-            inputs = data['x'].to(device) 
+        else:
+            inputs = data['x'].to(device, dtype=torch.float32, non_blocking=True)
             batch_size = inputs.size(0)
 
         labels = data['y'].float().to(device)
-        
+
+        # ── DEBUG ─────────────────────────────────────────────────────────────
+        _dbg_t2 = time.perf_counter()
+        _dbg_t_to_dev.append(_dbg_t2 - _dbg_t1)
+        # ─────────────────────────────────────────────────────────────────────
+
         # Wrap forward pass with autocast
         with torch.cuda.amp.autocast(enabled=args.apex):
 
@@ -657,12 +863,19 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
 
         # Step optimizer and update scaler
         scaler.step(optimizer)
-        scaler.update() 
-        
+        scaler.update()
+
         optimizer.zero_grad() # Clear gradients for next step
 
         # Step learning rate scheduler per batch
         scheduler.step()
+
+        # ── DEBUG ─────────────────────────────────────────────────────────────
+        # loss.item() (called above) already caused a CUDA sync, so this
+        # perf_counter reading accurately reflects the end of all GPU work.
+        _dbg_t3 = time.perf_counter()
+        _dbg_t_fwd_bwd.append(_dbg_t3 - _dbg_t2)
+        # ─────────────────────────────────────────────────────────────────────
 
         targs.append(labels.cpu().numpy()) 
 
@@ -719,6 +932,32 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
             preds.append(y_preds.cpu().numpy())
 
             
+        # ── DEBUG ─────────────────────────────────────────────────────────────
+        _dbg_t4 = time.perf_counter()
+        _dbg_t_cpu_post.append(_dbg_t4 - _dbg_t3)
+        _dbg_t_step_wall.append(_dbg_t4 - _dbg_t0_iter)
+        _dbg_ram_mb.append(_dbg_main_proc.memory_info().rss / 2**20)
+        _dbg_t0_iter = _dbg_t4   # reset for next data-fetch measurement
+
+        if (step + 1) % _DBG_PRINT_EVERY == 0:
+            n = len(_dbg_t_data)
+            def _ms(lst): return sum(lst) / len(lst) * 1000
+            print(
+                f"\n[DEBUG step timing] epoch {epoch+1}  steps {step+1-_DBG_PRINT_EVERY+1}–{step+1}"
+                f"\n  data (collate+pin) : {_ms(_dbg_t_data):.1f} ms/step"
+                f"\n  .to(device)        : {_ms(_dbg_t_to_dev):.1f} ms/step"
+                f"\n  fwd+bwd+optim      : {_ms(_dbg_t_fwd_bwd):.1f} ms/step"
+                f"\n  cpu post (copy etc): {_ms(_dbg_t_cpu_post):.1f} ms/step"
+                f"\n  total wall         : {_ms(_dbg_t_step_wall):.1f} ms/step"
+                f"\n  main RSS           : {_dbg_ram_mb[-1]:.0f} MB  "
+                f"(Δ from first sample: {_dbg_ram_mb[-1]-_dbg_ram_mb[0]:+.0f} MB)"
+            )
+            # reset accumulators for the next window
+            _dbg_t_data.clear(); _dbg_t_to_dev.clear()
+            _dbg_t_fwd_bwd.clear(); _dbg_t_cpu_post.clear()
+            _dbg_t_step_wall.clear(); _dbg_ram_mb.clear()
+        # ─────────────────────────────────────────────────────────────────────
+
         progress_iter.set_postfix(
             {
                 "lr": [optimizer.param_groups[0]['lr']],
