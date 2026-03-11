@@ -79,13 +79,16 @@ def do_experiments(args, device):
             all_val_results = {'f1': [], 'bacc': [], 'auc_roc': []}
             all_test_results = {'f1': [], 'bacc': [], 'auc_roc': []} 
             
-        # set test data loader
-        test_loader = MIL_dataloader(test_df ,'test', args)
+        # Create train/val loaders once (avoids re-preloading features for every run).
+        # Test loader is created just before evaluation.
+        # TODO: if slowdown continues, try re-creating dataloaders for each run to free memory etc.
+        train_loader = MIL_dataloader(train_df, 'train', args)
+        valid_loader = MIL_dataloader(val_df, 'val', args)
 
         # perform multiple runs (kruns) of training and testing
         for idx_run in range(args.n_runs):
             print(f'\n================== run nº: {idx_run} ======================')
-            args.cur_fold = idx_run  
+            args.cur_fold = idx_run
 
             # set seed for reproducibility
             seed_all(args.seed+args.start_run+idx_run)
@@ -95,7 +98,7 @@ def do_experiments(args, device):
             Path(path_results_run).mkdir(parents=True, exist_ok=True)
 
             # train and validate model
-            val_results, best_checkpoint_path = k_experiment(train_df, val_df, output_path= path_results_run, args = args, device = device)
+            val_results, best_checkpoint_path = k_experiment(train_df, val_df, output_path= path_results_run, args = args, device = device, train_loader=train_loader, valid_loader=valid_loader)
 
             # load the best model checkpoint
             checkpoint = torch.load(best_checkpoint_path, map_location='cpu', weights_only=False)
@@ -104,6 +107,7 @@ def do_experiments(args, device):
             fold_model.to(device)
 
             # evaluate model on test set
+            test_loader = MIL_dataloader(test_df, 'test', args)
             test_targs, test_preds, test_probs, test_results = valid_fn(
                 test_loader, fold_model, criterion = torch.nn.BCEWithLogitsLoss(reduction='mean'), args = args, device = device, split = 'test')
 
@@ -379,21 +383,25 @@ def k_experiment(train_df, val_df, output_path, args, device):
         output_path (Path): Directory to save results and checkpoints.
         args (Namespace): Configuration and hyperparameters.
         device (torch.device): Device to run model on.
+        train_loader: Optional pre-built DataLoader (avoids re-preloading features).
+        valid_loader: Optional pre-built DataLoader.
 
     Returns:
         Tuple:
             - best_val_stats (dict): Best evaluation metrics on validation set.
             - best_model_path (str): Path to the best model checkpoint.
     """
-        
+
     if args.running_interactive:
         # test on small subsets of data on interactive mode
         train_df = train_df.sample(1000)
         val_df = val_df.sample(n=1000)
 
-    # Initialize data loaders
-    train_loader = MIL_dataloader(train_df, 'train', args)
-    valid_loader = MIL_dataloader(val_df ,'val', args)
+    # Initialize data loaders (reuse if provided to avoid re-preloading features)
+    if train_loader is None:
+        train_loader = MIL_dataloader(train_df, 'train', args)
+    if valid_loader is None:
+        valid_loader = MIL_dataloader(val_df, 'val', args)
     print(f'train_loader: {len(train_loader)}, valid_loader: {len(valid_loader)}')
 
     # Build and load model
@@ -804,15 +812,16 @@ def valid_fn(valid_loader, model, criterion, args, device, split = 'val', epoch=
     
     for step, data in progress_iter:
 
-        # Send data to device
-        if isinstance(data['x'], dict): 
-            inputs = {scale: tensor.to(device, non_blocking=True) for scale, tensor in data['x'].items()}
+        # Send data to device; dtype=float32 converts float16 cache tensors on the GPU
+        # (fast vectorised op) while halving DRAM reads and PCIe transfer bytes.
+        if isinstance(data['x'], dict):
+            inputs = {scale: tensor.to(device, dtype=torch.float32, non_blocking=True) for scale, tensor in data['x'].items()}
             batch_size = inputs[args.scales[0]].size(0)
-        elif isinstance(data['x'], list): 
-            inputs = [tensor.to(device, non_blocking=True) for tensor in data['x']]
+        elif isinstance(data['x'], list):
+            inputs = [tensor.to(device, dtype=torch.float32, non_blocking=True) for tensor in data['x']]
             batch_size = inputs[0].size(0)
-        else: 
-            inputs = data['x'].to(device, non_blocking=True)
+        else:
+            inputs = data['x'].to(device, dtype=torch.float32, non_blocking=True)
             batch_size = inputs.size(0)
 
         labels = data['y'].float().to(device)
