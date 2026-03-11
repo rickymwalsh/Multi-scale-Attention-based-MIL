@@ -381,37 +381,48 @@ def MIL_dataloader(split_df, split, args):
         # Use pre-extracted features (no image transforms needed) 
         tfm = None
         
-    if args.roi_eval: 
+    if args.roi_eval:
         # Use ROI-specific dataset for detection evaluation
         split_dataset = Generic_MIL_Dataset_Detection(args=args, df=split_df, transform=tfm)
 
-    else: 
-        # Standard MIL dataset
-        split_dataset = Generic_MIL_Dataset(args=args, df=split_df, transform=tfm) 
+    else:
+        # Standard MIL dataset (split passed so only train split preloads into cache)
+        split_dataset = Generic_MIL_Dataset(args=args, df=split_df, transform=tfm, split=split)
 
+    # Val/test splits load from disk (no cache); use at least 1 worker so disk I/O
+    # is prefetched in the background and does not stall the GPU between batches.
+    val_num_workers = max(args.num_workers, 1) if args.feature_extraction == 'offline' else args.num_workers
+
+    # pin_memory is only beneficial when a background thread can pin while the GPU
+    # computes, i.e. when num_workers > 0.  With num_workers=0 the main thread pins
+    # synchronously via cudaMallocHost(), which is extremely slow for large tensors
+    # (100s of ms per call) and leaks pinned pages when bag sizes vary, causing
+    # progressive RAM growth and the step-timing slowdown observed in debugging.
     # DataLoader Configuration
     if split == 'train':
 
         loader = DataLoader(
-            split_dataset, 
-            batch_size=args.batch_size, 
-            shuffle=True, 
-            num_workers=args.num_workers, 
-            pin_memory=True,
+            split_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            pin_memory=args.num_workers > 0,
             drop_last=True,
-            collate_fn=collate_MIL_patches 
+            collate_fn=collate_MIL_patches,
+            persistent_workers=args.num_workers > 0,
         )
-        
-    else: 
-                
+
+    else:
+
         loader = DataLoader(
-            split_dataset, 
-            batch_size=args.batch_size if not args.roi_eval else 1, 
-            shuffle=False, 
-            num_workers=args.num_workers, 
-            pin_memory=True,
-            drop_last=False, 
-            collate_fn=collate_MIL_patches_detection if args.roi_eval else collate_MIL_patches
+            split_dataset,
+            batch_size=args.batch_size if not args.roi_eval else 1,
+            shuffle=False,
+            num_workers=val_num_workers,
+            pin_memory=val_num_workers > 0,
+            drop_last=False,
+            collate_fn=collate_MIL_patches_detection if args.roi_eval else collate_MIL_patches,
+            persistent_workers=val_num_workers > 0,
         )
 
     return loader 
