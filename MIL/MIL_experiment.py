@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from sklearn.metrics import confusion_matrix
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 from tqdm import tqdm
 
 # internal imports 
@@ -142,27 +142,41 @@ def do_experiments(args, device):
                 all_test_results['aggregated']['f1'].append(test_results['aggregated']['f1'])
                 all_test_results['aggregated']['bacc'].append(test_results['aggregated']['bacc'])
                 all_test_results['aggregated']['auc_roc'].append(test_results['aggregated']['auc_roc'])
-                
+
                 all_val_results['aggregated']['f1'].append(val_results['aggregated']['f1'])
                 all_val_results['aggregated']['bacc'].append(val_results['aggregated']['bacc'])
                 all_val_results['aggregated']['auc_roc'].append(val_results['aggregated']['auc_roc'])
 
-            else: 
+                # wandb logging
+                wandb.log({
+                    'test/auc_roc': test_results['aggregated']['auc_roc'],
+                    'test/f1': test_results['aggregated']['f1'],
+                    'test/bacc': test_results['aggregated']['bacc'],
+                }, commit=False)
+
+            else:
                 # Log and store results for non-multiscale models
-                
-                print(f"Test F1-Score: {test_results['f1']:.4f} | Test Bacc: {test_results['bacc']:.4f} | Test ROC-AUC: {test_results['auc_roc']:.4f}")           
+
+                print(f"Test F1-Score: {test_results['f1']:.4f} | Test Bacc: {test_results['bacc']:.4f} | Test ROC-AUC: {test_results['auc_roc']:.4f}")
 
                 plot_confusion_matrix(test_results['cf_matrix'], label_dict, '', path_results_run)
                 ROC_curves(test_targs, test_probs, '', path_results_run)
-                
-                # Append Results 
+
+                # Append Results
                 all_val_results['f1'].append(val_results['f1'])
                 all_val_results['bacc'].append(val_results['bacc'])
                 all_val_results['auc_roc'].append(val_results['auc_roc'])
-    
+
                 all_test_results['f1'].append(test_results['f1'])
                 all_test_results['bacc'].append(test_results['bacc'])
                 all_test_results['auc_roc'].append(test_results['auc_roc'])
+
+                # wandb logging
+                wandb.log({
+                    'test/auc_roc': test_results['auc_roc'],
+                    'test/f1': test_results['f1'],
+                    'test/bacc': test_results['bacc'],
+                }, commit=False)
 
         # Collect all results into structured format
         val_results_data = {'runs': np.arange(args.n_runs)}
