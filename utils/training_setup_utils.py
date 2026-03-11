@@ -210,7 +210,7 @@ def initialize_training_setup(train_loader, model, device, args):
 
     # Loss Function Setup
     if args.weighted_BCE == "y":
-        pos_wt = torch.tensor([args.BCE_weights]).to('cuda')
+        pos_wt = torch.tensor([args.BCE_weights]).to(device)
         print(f'pos_wt: {pos_wt}')
         train_criterion = torch.nn.BCEWithLogitsLoss(reduction='mean', pos_weight=pos_wt)
     else:
