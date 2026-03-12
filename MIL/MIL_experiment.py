@@ -33,6 +33,58 @@ from utils.training_setup_utils import initialize_training_setup, Training_Stage
 from utils.plot_utils import plot_loss_and_acc_curves, plot_lrs_scheduler, plot_confusion_matrix, ROC_curves
 from utils.data_split_utils import generator_cross_val_folds, stratified_train_val_split
 
+def _append_registry(args, metrics_data: pd.DataFrame) -> None:
+    """Append a one-row summary for this experiment to the shared registry CSV.
+
+    The registry lives at ``{output_dir}/experiments_registry.csv`` and
+    accumulates a human-readable overview of every completed run so you can
+    quickly scan past experiments without opening individual ``args.yaml`` files.
+    """
+    registry_path = args.registry_path
+
+    def _mean_auc(split: str) -> float:
+        subset = metrics_data[metrics_data['split'] == split]
+        # Prefer the 'mean' summary row when multiple runs/folds exist
+        for id_col in ('runs', 'folds'):
+            if id_col in subset.columns:
+                mean_rows = subset[subset[id_col] == 'mean']
+                if len(mean_rows):
+                    subset = mean_rows
+                break
+        row = subset.iloc[0]
+        for col in ('auc_roc_aggregated', 'auc', 'auc_roc'):
+            if col in row.index:
+                try:
+                    return float(row[col])
+                except (ValueError, TypeError):
+                    pass
+        return float('nan')
+
+    val_auc = _mean_auc('validation')
+    test_auc = _mean_auc('test')
+
+    entry = {
+        'exp_id': args.exp_id,
+        'date': datetime.now().strftime('%Y-%m-%d'),
+        'dataset': args.dataset,
+        'label': args.label,
+        'model': args.multi_scale_model or 'single',
+        'scales': str(list(args.scales)) if args.scales else '',
+        'lr': args.lr,
+        'bs': args.batch_size,
+        'pooling': args.pooling_type,
+        'scale_agg': args.type_scale_aggregator or '',
+        'enc_dim': args.fcl_encoder_dim,
+        'deep_supervision': args.deep_supervision,
+        'val_auc': round(val_auc, 4) if not np.isnan(val_auc) else '',
+        'test_auc': round(test_auc, 4) if not np.isnan(test_auc) else '',
+        'output_path': str(args.output_path),
+    }
+    write_header = not registry_path.exists()
+    pd.DataFrame([entry]).to_csv(registry_path, mode='a', header=write_header, index=False)
+    print(f"Registry updated: {registry_path}")
+
+
 def do_experiments(args, device):
         
     args.n_class = 1 # Binary classification setup (single output neuron)
@@ -117,6 +169,8 @@ def do_experiments(args, device):
                 mode=args.wandb_mode,
                 name=f"{args.wandb_group}_run{run_idx}",
                 group=args.wandb_group,
+                tags=getattr(args, 'wandb_tags', None),
+                notes=getattr(args, 'wandb_notes', None),
                 config=vars(args),
             )
 
@@ -263,6 +317,8 @@ def do_experiments(args, device):
         metrics_data = pd.concat([val_results_data, test_results_data], keys=['validation', 'test'], names=['split', 'index'])
         metrics_data = metrics_data.reset_index(level='split') # Reset index to turn the keys into columns
         metrics_data.to_csv(args.output_path / 'results_summary.csv', index=False)
+        if hasattr(args, 'registry_path'):
+            _append_registry(args, metrics_data)
 
 
     elif args.eval_scheme == 'kfold_cv+test':
@@ -301,6 +357,8 @@ def do_experiments(args, device):
                 mode=args.wandb_mode,
                 name=f"{args.wandb_group}_fold{fold}",
                 group=args.wandb_group,
+                tags=getattr(args, 'wandb_tags', None),
+                notes=getattr(args, 'wandb_notes', None),
                 config=vars(args),
             )
 
@@ -408,6 +466,8 @@ def do_experiments(args, device):
         metrics_data = pd.concat([val_results_data, test_results_data], keys=['validation', 'test'], names=['split', 'index'])
         metrics_data = metrics_data.reset_index(level='split') # Reset index to turn the keys into columns
         metrics_data.to_csv(args.output_path / 'results_summary.csv', index=False)
+        if hasattr(args, 'registry_path'):
+            _append_registry(args, metrics_data)
 
 
 def k_experiment(train_df, val_df, output_path, args, device, train_loader=None, valid_loader=None):
