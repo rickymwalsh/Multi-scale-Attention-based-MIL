@@ -7,6 +7,8 @@ from utils.generic_utils import seed_all
 #external imports
 import warnings
 import os
+import hashlib
+import json
 import torch
 import wandb
 
@@ -17,6 +19,58 @@ import time
 from datetime import datetime
 
 from pathlib import Path
+
+
+def _compute_exp_id(args, date_str: str) -> str:
+    """Generate a hybrid date+hash experiment ID.
+
+    The 8-char hex hash is deterministic: identical key configs always produce
+    the same ID, enabling natural deduplication of re-runs.
+    """
+    hash_params = {
+        'dataset': args.dataset,
+        'label': args.label,
+        'mil_type': args.mil_type,
+        'pooling_type': args.pooling_type,
+        'map_prob_func': args.map_prob_func,
+        'multi_scale_model': args.multi_scale_model,
+        'scales': sorted(args.scales) if args.scales else None,
+        'type_scale_aggregator': args.type_scale_aggregator,
+        'deep_supervision': args.deep_supervision,
+        'type_mil_encoder': args.type_mil_encoder,
+        'fcl_encoder_dim': args.fcl_encoder_dim,
+        'fcl_dropout': args.fcl_dropout,
+        'drop_attention_pool': args.drop_attention_pool,
+        'lr': args.lr,
+        'batch_size': args.batch_size,
+        'fpn_dim': args.fpn_dim,
+        'nested_model': args.nested_model,
+        'type_region_aggregator': args.type_region_aggregator,
+        'feature_extraction': args.feature_extraction,
+    }
+    raw = json.dumps(hash_params, sort_keys=True)
+    hash8 = hashlib.sha256(raw.encode()).hexdigest()[:8]
+    return f"{date_str}_{hash8}"
+
+
+def _build_wandb_tags(args) -> list:
+    """Derive a list of tags from key config params for wandb filtering."""
+    tags = [
+        args.dataset,
+        args.label,
+        f"model_{args.multi_scale_model or 'single'}",
+        f"pool_{args.pooling_type}",
+        f"lr_{args.lr}",
+        f"bs_{args.batch_size}",
+        f"enc_dim_{args.fcl_encoder_dim}",
+    ]
+    if args.multi_scale_model:
+        tags.append(f"scales_{'_'.join(str(s) for s in args.scales)}")
+        if args.type_scale_aggregator:
+            tags.append(f"agg_{args.type_scale_aggregator}")
+        if args.deep_supervision:
+            tags.append("deep_supervision")
+    return tags
 
 def config():
     parser = argparse.ArgumentParser()
@@ -194,59 +248,26 @@ def main(args):
 
     if args.train:
 
-        args.wandb_group = args.wandb_name or f"{args.label}_{args.multi_scale_model or 'single'}_{args.pooling_type}"
+        # Deterministic experiment ID: date prefix + 8-char config hash
+        exp_id = _compute_exp_id(args, now.replace('-', ''))
+        args.exp_id = exp_id
+        args.wandb_group = args.wandb_name or exp_id
+        args.wandb_tags = _build_wandb_tags(args)
+        args.wandb_notes = (
+            f"{args.dataset}/{args.label} | "
+            f"model={args.multi_scale_model or 'single'} pool={args.pooling_type} "
+            f"lr={args.lr} bs={args.batch_size} enc_dim={args.fcl_encoder_dim}"
+        )
 
         # From MammoCLIP's work
         if args.weighted_BCE == "y" and args.dataset.lower() == "vindr" and args.label.lower() == "mass":
             args.BCE_weights = 15.573306370070778
         elif args.weighted_BCE == "y" and args.dataset.lower() == "vindr" and args.label.lower() == "suspicious_calcification":
             args.BCE_weights = 37.296728971962615
-        
-        root = ''
-        if args.mil_type:
 
-            #ENCODER STAGE
-            if args.type_mil_encoder == 'mlp': 
-                encoder_text = f'encoder_mlp-dim_{args.fcl_encoder_dim}-dropout_{args.fcl_dropout}'
-            else: 
-                num_heads = args.sab_num_heads if args.type_mil_encoder == 'sab' else args.isab_num_heads
-                layer_norm = 'layer_norm' if args.trans_layer_norm else ''
-                encoder_text = f'{args.type_mil_encoder}-dim_{args.fcl_encoder_dim}-nblocks_{args.num_encoder_blocks}-nheads_{num_heads}-dropout_{args.drop_mha}-{layer_norm}-{args.map_prob_func}'
+        args.output_path = Path(args.output_dir) / "experiments" / args.dataset / args.label / exp_id
+        args.registry_path = Path(args.output_dir) / "experiments_registry.csv"
 
-            #POOLING STAGE 
-            if args.pooling_type in ['attention', 'gated-attention']:
-                pooling_text = f'pooling_{args.pooling_type}-dropout_{args.drop_attention_pool}-{args.map_prob_func}'
-            elif args.pooling_type == 'pma': 
-                layer_norm = 'layer_norm' if args.trans_layer_norm else ''
-                pooling_text = f'pooling_{args.pooling_type}-dropout_{args.drop_mha}-{layer_norm}-{args.map_prob_func}'
-            else: 
-                pooling_text = f'pooling_{args.pooling_type}'
-
-            #MULTI-SCALE INSTANCE ENCODER 
-            if args.multi_scale_model in ['fpn', 'backbone_pyramid']: 
-                deep_supervision = f'-deep_supervision' if args.deep_supervision else ''
-                nested_model = f'-nested' if args.nested_model else ''
-                multi_scale_text = f'{args.multi_scale_model}{nested_model}{deep_supervision}'
-
-                scale_aggregator_text = f'scale_aggregator_{args.type_scale_aggregator}' 
-            
-                root = f"multi_scale/{multi_scale_text}/{scale_aggregator_text}/{encoder_text}/{pooling_text}"
-                
-            elif args.multi_scale_model == 'msp':
-                deep_supervision = '-deep_supervision' if args.deep_supervision else '' 
-                root = f"multi_scale/MSP{deep_supervision}/scale_aggregator_{args.type_scale_aggregator}/{encoder_text}/{pooling_text}"
-            
-            else:  
-                root = f"single_scale-patch_size_{args.scales[0]}/{args.mil_type}/{encoder_text}/{pooling_text}"
-
-        if args.feature_extraction == 'online': 
-            data_aug = '-aug' if args.data_aug else '' 
-            train_mode = f'ft-warmup_{args.warmup_stage_epochs}{data_aug}' if args.training_mode == 'finetune' else f'patch_size_{args.patch_size}-overlap_{args.overlap[0]}_lp{data_aug}'
-        else: 
-            train_mode = 'offline_feature_extraction'
-            
-        args.output_path = Path(f"{args.output_dir}/MIL_experiments/{args.dataset}_data_frac_{args.data_frac}/{args.label}/{train_mode}/{root}/{now}") 
-        
         os.makedirs(args.output_path, exist_ok=True)
         print(f"output_path: {args.output_path}")
     
