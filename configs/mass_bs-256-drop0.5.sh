@@ -5,10 +5,10 @@ if [ -z "$gpu_id" ]; then
   echo "No GPU ID provided. Using default GPU (0)."
   gpu_id=0
 fi
-# bs=256 requires 39GB memory, 45-60s per epoch
+
 python main.py \
   --train \
-  --label "Suspicious_Calcification" \
+  --label "Mass" \
   --output_dir /home/walsh/gaze/gazeMIL/results/vindr-mammo-b2 \
   --data_dir '' \
   --clip_chk_pt_path /home/walsh/.cache/huggingface/hub/models--shawn24--Mammo-CLIP/snapshots/2f356926a00fc3f0d9fdad1193c1464fd9adf564/Pre-trained-checkpoints/b2-model-best-epoch-10.tar \
@@ -18,21 +18,19 @@ python main.py \
   --img_dir preprocessed_mammoclip \
   --dataset 'ViNDr' \
   --feature_extraction "offline" \
-  --epochs 15 \
+  --epochs 30 \
   --batch-size 256 \
   --eval_scheme 'kruns_train+val+test' \
-  --n_runs 10 \
+  --n_runs 2 \
   --lr 5.0e-5 \
   --weighted-BCE 'y' \
   --mil_type 'pyramidal_mil' \
   --multi_scale_model 'fpn' \
   --fpn_dim 256 \
   --fcl_encoder_dim 256 \
-  --fcl_dropout 0.25 \
-  --type_mil_encoder 'isab' \
-  --trans_layer_norm True \
-  --pooling_type 'pma' \
-  --drop_attention_pool 0.25 \
+  --fcl_dropout 0.5 \
+  --pooling_type 'gated-attention' \
+  --drop_attention_pool 0.5 \
   --type_scale_aggregator 'gated-attention' \
   --deep_supervision \
   --scales 16 32 128 \
