@@ -1,6 +1,7 @@
 #external imports
 import gc
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -10,18 +11,6 @@ import torch.nn.functional as F
 from sklearn.metrics import confusion_matrix
 import wandb
 from tqdm import tqdm
-
-# ── DEBUG IMPORTS (remove after debugging slowdown) ──────────────────────────
-import os
-import shutil
-import psutil
-try:
-    import pynvml as _pynvml
-    _pynvml.nvmlInit()
-    _NVML_AVAILABLE = True
-except Exception:
-    _NVML_AVAILABLE = False
-# ─────────────────────────────────────────────────────────────────────────────
 
 # internal imports 
 from Datasets.dataset_utils import MIL_dataloader
@@ -516,106 +505,6 @@ def k_experiment(train_df, val_df, output_path, args, device, train_loader=None,
     best_val_stats, best_model = train_loop(train_loader, valid_loader, model, training_stage_manager, train_criterion, eval_criterion, optimizer, scheduler, scaler, output_path, args, device)
     
     return best_val_stats, best_model
-    
-
-# ── DEBUG: system-resource snapshot (remove after debugging slowdown) ─────────
-def _log_system_stats(label: str, device: torch.device) -> None:
-    """Print a snapshot of CPU, RAM, swap, GPU memory/util, GC counts, worker
-    process RSS, and /dev/shm usage.  Called once per epoch boundary.
-    Remove this function and all call-sites once the slowdown is identified."""
-
-    sep = "=" * 70
-    print(f"\n{sep}")
-    print(f"[DEBUG RESOURCE SNAPSHOT] {label}")
-    print(sep)
-
-    # ── CPU ──────────────────────────────────────────────────────────────────
-    cpu_pct = psutil.cpu_percent(interval=0.2)          # 200 ms sample
-    cpu_count = psutil.cpu_count(logical=True)
-    print(f"  CPU utilisation : {cpu_pct:.1f}%  ({cpu_count} logical cores)")
-
-    # ── RAM ──────────────────────────────────────────────────────────────────
-    vm = psutil.virtual_memory()
-    print(f"  RAM total       : {vm.total / 2**30:.2f} GB")
-    print(f"  RAM used        : {vm.used  / 2**30:.2f} GB  ({vm.percent:.1f}%)")
-    print(f"  RAM available   : {vm.available / 2**30:.2f} GB")
-
-    # ── Swap ─────────────────────────────────────────────────────────────────
-    sw = psutil.swap_memory()
-    print(f"  Swap total      : {sw.total / 2**30:.2f} GB")
-    print(f"  Swap used       : {sw.used  / 2**30:.2f} GB  ({sw.percent:.1f}%)")
-
-    # ── /dev/shm (Linux shared memory used by DataLoader workers) ────────────
-    try:
-        shm = shutil.disk_usage('/dev/shm')
-        print(f"  /dev/shm used   : {shm.used  / 2**30:.2f} GB  "
-              f"/ {shm.total / 2**30:.2f} GB  "
-              f"({100 * shm.used / max(shm.total, 1):.1f}%)")
-        # Count lingering shared-memory files from PyTorch workers
-        shm_files = [f for f in os.listdir('/dev/shm') if f.startswith('torch_')]
-        print(f"  /dev/shm torch_ : {len(shm_files)} file(s)")
-    except OSError:
-        pass
-
-    # ── GPU ──────────────────────────────────────────────────────────────────
-    if device.type == 'cuda':
-        idx = device.index if device.index is not None else torch.cuda.current_device()
-        alloc   = torch.cuda.memory_allocated(idx)
-        peak    = torch.cuda.max_memory_allocated(idx)
-        reserved = torch.cuda.memory_reserved(idx)
-        total_gpu = torch.cuda.get_device_properties(idx).total_memory
-        print(f"  GPU [{idx}] allocated : {alloc   / 2**30:.3f} GB")
-        print(f"  GPU [{idx}] peak alloc: {peak    / 2**30:.3f} GB")
-        print(f"  GPU [{idx}] reserved  : {reserved / 2**30:.3f} GB")
-        print(f"  GPU [{idx}] total     : {total_gpu / 2**30:.3f} GB")
-        torch.cuda.reset_peak_memory_stats(idx)   # reset after each report
-
-        if _NVML_AVAILABLE:
-            try:
-                handle = _pynvml.nvmlDeviceGetHandleByIndex(idx)
-                util   = _pynvml.nvmlDeviceGetUtilizationRates(handle)
-                mem_i  = _pynvml.nvmlDeviceGetMemoryInfo(handle)
-                print(f"  GPU [{idx}] util (nvml): {util.gpu}%  "
-                      f"mem util: {util.memory}%")
-                print(f"  GPU [{idx}] mem (nvml) : "
-                      f"{mem_i.used / 2**30:.3f} / {mem_i.total / 2**30:.3f} GB")
-            except Exception as _e:
-                print(f"  GPU nvml query failed: {_e}")
-
-    # ── Python GC ────────────────────────────────────────────────────────────
-    gc_counts = gc.get_count()          # (gen0, gen1, gen2) since last collect
-    n_tracked  = len(gc.get_objects())  # total tracked objects in gen0-2
-    print(f"  GC gen counts   : gen0={gc_counts[0]}, gen1={gc_counts[1]}, "
-          f"gen2={gc_counts[2]}")
-    print(f"  GC tracked objs : {n_tracked:,}")
-    # gc.get_freeze_count() exists in CPython ≥ 3.11; fall back gracefully
-    if hasattr(gc, 'get_freeze_count'):
-        print(f"  GC frozen objs  : {gc.get_freeze_count():,}")
-
-    # ── DataLoader worker processes ───────────────────────────────────────────
-    current = psutil.Process(os.getpid())
-    children = current.children(recursive=True)
-    worker_procs = [c for c in children if 'worker' in ' '.join(c.cmdline()).lower()
-                    or c.name() in ('python', 'python3')]
-    if worker_procs:
-        total_worker_rss = sum(c.memory_info().rss for c in worker_procs)
-        print(f"  Worker procs    : {len(worker_procs)}  "
-              f"total RSS: {total_worker_rss / 2**30:.2f} GB")
-        for c in worker_procs:
-            try:
-                rss = c.memory_info().rss / 2**30
-                print(f"    PID {c.pid:6d}  RSS {rss:.2f} GB  status={c.status()}")
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-    else:
-        print(f"  Worker procs    : 0 child processes found")
-
-    # ── Main process RSS ─────────────────────────────────────────────────────
-    main_rss = current.memory_info().rss
-    print(f"  Main proc RSS   : {main_rss / 2**30:.2f} GB")
-
-    print(sep + "\n")
-# ─────────────────────────────────────────────────────────────────────────────
 
 
 def train_loop(train_loader, valid_loader, model, training_stage_manager, train_criterion, eval_criterion, optimizer, scheduler, scaler, output_path, args, device):
@@ -635,10 +524,6 @@ def train_loop(train_loader, valid_loader, model, training_stage_manager, train_
         print(f"\n-------- Epoch {epoch + 1}/{args.epochs} --------")
 
         start_time = time.time()
-
-        # ── DEBUG: snapshot before training (remove after debugging slowdown) ─
-        _log_system_stats(f"Epoch {epoch + 1}/{args.epochs} START", device)
-        # ──────────────────────────────────────────────────────────────────────
 
         if training_stage_manager is not None:
             training_stage_manager(model, optimizer, epoch, optimizer.param_groups[0]['lr'])
@@ -667,13 +552,6 @@ def train_loop(train_loader, valid_loader, model, training_stage_manager, train_
             val_stats = valid_fn(valid_loader, model, eval_criterion, args, device, split = 'val', epoch = epoch)
 
         elapsed = time.time() - start_time
-
-        # ── DEBUG: snapshot after train+val (remove after debugging slowdown) ─
-        _log_system_stats(
-            f"Epoch {epoch + 1}/{args.epochs} END  (epoch wall time: {elapsed:.1f}s)",
-            device,
-        )
-        # ──────────────────────────────────────────────────────────────────────
 
         # If using multi-scale model, report scale-specific and aggregated results
         if args.multi_scale_model is not None:
@@ -860,26 +738,8 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
         
     start = time.time()
 
-    # ── DEBUG: per-step timing (remove after debugging slowdown) ─────────────
-    _DBG_PRINT_EVERY = 50          # print a timing summary every N steps
-    _dbg_t_data   = []             # time spent waiting for data (collate + pin)
-    _dbg_t_to_dev = []             # time spent on .to(device)
-    _dbg_t_fwd_bwd = []            # time for forward + backward + optim step
-    _dbg_t_cpu_post = []           # time for CPU work after optim (labels/preds copy)
-    _dbg_ram_mb = []               # main-process RSS in MB after each step
-    _dbg_t_step_wall = []          # total wall time for the step
-    _dbg_t0_iter = time.perf_counter()   # start of the first data-fetch
-    _dbg_main_proc = psutil.Process(os.getpid())
-    # ─────────────────────────────────────────────────────────────────────────
-
     # Iterate over batches
     for step, data in progress_iter:
-
-        # ── DEBUG ─────────────────────────────────────────────────────────────
-        _dbg_t1 = time.perf_counter()
-        _dbg_t_data.append(_dbg_t1 - _dbg_t0_iter)   # data-fetch wall time
-        # ─────────────────────────────────────────────────────────────────────
-
         # Send data to device; dtype=float32 converts float16 cache tensors on the GPU
         # (fast vectorised op) while halving DRAM reads and PCIe transfer bytes.
         if isinstance(data['x'], dict):
@@ -893,11 +753,6 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
             batch_size = inputs.size(0)
 
         labels = data['y'].float().to(device)
-
-        # ── DEBUG ─────────────────────────────────────────────────────────────
-        _dbg_t2 = time.perf_counter()
-        _dbg_t_to_dev.append(_dbg_t2 - _dbg_t1)
-        # ─────────────────────────────────────────────────────────────────────
 
         # Wrap forward pass with autocast
         with torch.cuda.amp.autocast(enabled=args.apex):
@@ -955,13 +810,6 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
         # Step learning rate scheduler per batch
         scheduler.step()
 
-        # ── DEBUG ─────────────────────────────────────────────────────────────
-        # loss.item() (called above) already caused a CUDA sync, so this
-        # perf_counter reading accurately reflects the end of all GPU work.
-        _dbg_t3 = time.perf_counter()
-        _dbg_t_fwd_bwd.append(_dbg_t3 - _dbg_t2)
-        # ─────────────────────────────────────────────────────────────────────
-
         targs.append(labels.cpu().numpy()) 
 
         
@@ -1015,33 +863,6 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
     
             probs.append(y_probs.cpu().numpy())
             preds.append(y_preds.cpu().numpy())
-
-            
-        # ── DEBUG ─────────────────────────────────────────────────────────────
-        _dbg_t4 = time.perf_counter()
-        _dbg_t_cpu_post.append(_dbg_t4 - _dbg_t3)
-        _dbg_t_step_wall.append(_dbg_t4 - _dbg_t0_iter)
-        _dbg_ram_mb.append(_dbg_main_proc.memory_info().rss / 2**20)
-        _dbg_t0_iter = _dbg_t4   # reset for next data-fetch measurement
-
-        if (step + 1) % _DBG_PRINT_EVERY == 0:
-            n = len(_dbg_t_data)
-            def _ms(lst): return sum(lst) / len(lst) * 1000
-            print(
-                f"\n[DEBUG step timing] epoch {epoch+1}  steps {step+1-_DBG_PRINT_EVERY+1}–{step+1}"
-                f"\n  data (collate+pin) : {_ms(_dbg_t_data):.1f} ms/step"
-                f"\n  .to(device)        : {_ms(_dbg_t_to_dev):.1f} ms/step"
-                f"\n  fwd+bwd+optim      : {_ms(_dbg_t_fwd_bwd):.1f} ms/step"
-                f"\n  cpu post (copy etc): {_ms(_dbg_t_cpu_post):.1f} ms/step"
-                f"\n  total wall         : {_ms(_dbg_t_step_wall):.1f} ms/step"
-                f"\n  main RSS           : {_dbg_ram_mb[-1]:.0f} MB  "
-                f"(Δ from first sample: {_dbg_ram_mb[-1]-_dbg_ram_mb[0]:+.0f} MB)"
-            )
-            # reset accumulators for the next window
-            _dbg_t_data.clear(); _dbg_t_to_dev.clear()
-            _dbg_t_fwd_bwd.clear(); _dbg_t_cpu_post.clear()
-            _dbg_t_step_wall.clear(); _dbg_ram_mb.clear()
-        # ─────────────────────────────────────────────────────────────────────
 
         progress_iter.set_postfix(
             {
