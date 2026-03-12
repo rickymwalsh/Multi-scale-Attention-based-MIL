@@ -109,6 +109,17 @@ def do_experiments(args, device):
             path_results_run = args.output_path / f'run_{args.start_run+idx_run}'
             Path(path_results_run).mkdir(parents=True, exist_ok=True)
 
+            # initialise a fresh wandb run for each k-run so step counters reset
+            run_idx = args.start_run + idx_run
+            wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                mode=args.wandb_mode,
+                name=f"{args.wandb_group}_run{run_idx}",
+                group=args.wandb_group,
+                config=vars(args),
+            )
+
             # train and validate model
             val_results, best_checkpoint_path = k_experiment(train_df, val_df, output_path= path_results_run, args = args, device = device, train_loader=train_loader, valid_loader=valid_loader)
 
@@ -194,6 +205,8 @@ def do_experiments(args, device):
                     'test/bacc': test_results['bacc'],
                 }, commit=False)
 
+            wandb.finish()
+
         # Collect all results into structured format
         val_results_data = {'runs': np.arange(args.n_runs)}
         test_results_data = {'runs': np.arange(args.n_runs)}
@@ -273,13 +286,23 @@ def do_experiments(args, device):
         for fold in range(args.start_fold, args.n_folds):
 
             print(f'\n================== fold: {fold} training ======================')
-            
+
             args.cur_fold = fold
             seed_all(args.seed)
 
-            # Setup path for the current fold's results 
+            # Setup path for the current fold's results
             path_results_fold = args.output_path / f'fold_{fold}'
             Path(path_results_fold).mkdir(parents=True, exist_ok=True)
+
+            # initialise a fresh wandb run for each fold so step counters reset
+            wandb.init(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                mode=args.wandb_mode,
+                name=f"{args.wandb_group}_fold{fold}",
+                group=args.wandb_group,
+                config=vars(args),
+            )
 
             # Get the next train/val split
             train_df, val_df = next(train_val_splits)
@@ -338,6 +361,8 @@ def do_experiments(args, device):
             # Save confusion matrix and ROC curves
             plot_confusion_matrix(test_results['aggregated']['cf_matrix'], label_dict, '', fold_path)
             ROC_curves(test_targs, test_probs, '', fold_path)
+
+            wandb.finish()
 
         # Create a dictionary to hold all final results
         val_results_data = {'folds': np.arange(args.n_folds)}

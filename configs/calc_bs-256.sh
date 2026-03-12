@@ -18,7 +18,7 @@ python main.py \
   --img_dir preprocessed_mammoclip \
   --dataset 'ViNDr' \
   --feature_extraction "offline" \
-  --epochs 100 \
+  --epochs 15 \
   --batch-size 256 \
   --eval_scheme 'kruns_train+val+test' \
   --n_runs 2 \

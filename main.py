@@ -194,15 +194,7 @@ def main(args):
 
     if args.train:
 
-        # Initialise wandb
-        run_name = args.wandb_name or f"{args.label}_{args.multi_scale_model or 'single'}_{args.pooling_type}"
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            mode=args.wandb_mode,
-            name=run_name,
-            config=vars(args),
-        )
+        args.wandb_group = args.wandb_name or f"{args.label}_{args.multi_scale_model or 'single'}_{args.pooling_type}"
 
         # From MammoCLIP's work
         if args.weighted_BCE == "y" and args.dataset.lower() == "vindr" and args.label.lower() == "mass":
@@ -268,7 +260,6 @@ def main(args):
             f.write(args_text)
         
         do_experiments(args, device)
-        wandb.finish()
 
     elif args.evaluation:
         Eval(args, device)
