@@ -21,7 +21,7 @@ python main.py \
   --epochs 30 \
   --batch-size 8 \
   --eval_scheme 'kruns_train+val+test' \
-  --n_runs 10 \
+  --n_runs 3 \
   --lr 5.0e-5 \
   --weighted-BCE 'y' \
   --mil_type 'pyramidal_mil' \

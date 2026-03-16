@@ -19,20 +19,22 @@ python main.py \
   --dataset 'ViNDr' \
   --feature_extraction "offline" \
   --epochs 30 \
-  --batch-size 256 \
+  --batch-size 8 \
   --eval_scheme 'kruns_train+val+test' \
-  --n_runs 2 \
+  --n_runs 3 \
   --lr 5.0e-5 \
   --weighted-BCE 'y' \
   --mil_type 'pyramidal_mil' \
   --multi_scale_model 'fpn' \
   --fpn_dim 256 \
   --fcl_encoder_dim 256 \
-  --fcl_dropout 0.5 \
+  --fcl_dropout 0.25 \
   --pooling_type 'gated-attention' \
-  --drop_attention_pool 0.5 \
+  --drop_attention_pool 0.25 \
   --type_scale_aggregator 'gated-attention' \
   --deep_supervision \
   --scales 16 32 128 \
   --device cuda:$gpu_id \
-  --num-workers 0
+  --num-workers 0 \
+  --final_pooling 'pool4' \
+  --weight-decay 1e-1

@@ -18,7 +18,7 @@ python main.py \
   --img_dir preprocessed_mammoclip \
   --dataset 'ViNDr' \
   --feature_extraction "offline" \
-  --epochs 15 \
+  --epochs 30 \
   --batch-size 256 \
   --eval_scheme 'kruns_train+val+test' \
   --n_runs 10 \
@@ -38,3 +38,4 @@ python main.py \
   --scales 16 32 128 \
   --device cuda:$gpu_id \
   --num-workers 0
+
