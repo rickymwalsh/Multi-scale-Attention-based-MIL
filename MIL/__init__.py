@@ -22,7 +22,8 @@ def build_model(args):
                 in_channels_list=args.fpn_in_channels,
                 top_down_pathway=True if args.multi_scale_model == 'fpn' else False,
                 upsample_method=args.upsample_method,
-                norm_layer=args.norm_fpn
+                norm_layer=args.norm_fpn,
+                final_pooling=getattr(args, 'final_pooling', None)
             )
                 
             num_chs = args.fpn_dim 

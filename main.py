@@ -113,6 +113,7 @@ def config():
 
     parser.add_argument("--feature_extraction", default = 'offline', type = str) 
     parser.add_argument("--feat_dim", default = 352, type = int) 
+    parser.add_argument('--final_pooling', default='maxpool', choices = ['maxpool', 'pool4'], type=str, help="Which pooling operation to apply after the FPN feature maps. By default, the original from the paper is applied: max pooling with stride=4 and kernel_size=1. option pool4=> kernel_size=4, stride=4.")
     
     # Patch extraction 
     parser.add_argument('--patching', action = 'store_true', default = False, help = 'Wether to perform patching on full-resolution images. If false, it will consider previously extracted patches that were saved in a directory (default: False)')

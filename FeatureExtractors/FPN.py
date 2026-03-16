@@ -30,12 +30,14 @@ class FeaturePyramidNetwork(nn.Module):
         in_channels_list: Optional[list] = None,
         top_down_pathway: bool = True,
         upsample_method: str = 'nearest', 
-        norm_layer: Optional[Callable[..., nn.Module]] = None
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        final_pooling: Optional[str] = None
     ):
         super().__init__()
                 
         self.top_down_pathway = top_down_pathway
         self.upsample_method = upsample_method
+        self.final_pooling = final_pooling
 
         self.backbone = backbone
         # Default to B2 channels [120, 352]; pass [128, 176] for B5.
@@ -118,7 +120,10 @@ class FeaturePyramidNetwork(nn.Module):
                 results.insert(0, self.layer_blocks[f"layer_block_{idx}"](inner_lateral))
 
         # stride four downsampling over the coarser feature maps 
-        results.append(F.max_pool2d(results[-1], kernel_size=1, stride=4, padding=0))
+        if self.final_pooling == 'pool4':
+            results.append(F.max_pool2d(results[-1], kernel_size=4, stride=4, padding=0))
+        else:
+            results.append(F.max_pool2d(results[-1], kernel_size=1, stride=4, padding=0))  # original from paper
                        
         # Convert the results list to an OrderedDict 
         results = OrderedDict([(f'feat_{idx}', fmap) for idx, fmap in enumerate(results)])
