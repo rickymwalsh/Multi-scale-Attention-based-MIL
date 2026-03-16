@@ -401,16 +401,43 @@ def MIL_dataloader(split_df, split, args):
     # DataLoader Configuration
     if split == 'train':
 
-        loader = DataLoader(
-            split_dataset,
-            batch_size=args.batch_size,
-            shuffle=True,
-            num_workers=args.num_workers,
-            pin_memory=args.num_workers > 0,
-            drop_last=True,
-            collate_fn=collate_MIL_patches,
-            persistent_workers=args.num_workers > 0,
-        )
+        if args.balanced_dataloader == 'y':
+            labels = split_df[args.label].values
+            n_pos = int(labels.sum())
+            n_neg = len(labels) - n_pos
+            sample_weights = torch.tensor(
+                [1.0 / n_neg if lbl == 0 else 1.0 / n_pos for lbl in labels],
+                dtype=torch.float,
+            )
+            sampler = torch.utils.data.WeightedRandomSampler(
+                weights=sample_weights,
+                num_samples=len(labels),
+                replacement=True,
+            )
+            ratio = n_neg / n_pos if n_pos > 0 else float('inf')
+            print(f"[balanced_dataloader] n_pos={n_pos}, n_neg={n_neg}, "
+                  f"imbalance ratio={ratio:.1f}:1 → oversampling minority class")
+            loader = DataLoader(
+                split_dataset,
+                batch_size=args.batch_size,
+                sampler=sampler,
+                num_workers=args.num_workers,
+                pin_memory=args.num_workers > 0,
+                drop_last=True,
+                collate_fn=collate_MIL_patches,
+                persistent_workers=args.num_workers > 0,
+            )
+        else:
+            loader = DataLoader(
+                split_dataset,
+                batch_size=args.batch_size,
+                shuffle=True,
+                num_workers=args.num_workers,
+                pin_memory=args.num_workers > 0,
+                drop_last=True,
+                collate_fn=collate_MIL_patches,
+                persistent_workers=args.num_workers > 0,
+            )
 
     else:
 

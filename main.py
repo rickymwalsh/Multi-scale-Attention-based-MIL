@@ -266,6 +266,9 @@ def main(args):
         elif args.weighted_BCE == "y" and args.dataset.lower() == "vindr" and args.label.lower() == "suspicious_calcification":
             args.BCE_weights = 37.296728971962615
 
+        if args.balanced_dataloader == 'y':
+            print("[balanced_dataloader] WeightedRandomSampler enabled — minority class will be oversampled each epoch.")
+
         args.output_path = Path(args.output_dir) / "experiments" / args.dataset / args.label / exp_id
         args.registry_path = Path(args.output_dir) / "experiments_registry.csv"
 
