@@ -22,6 +22,32 @@ from utils.training_setup_utils import initialize_training_setup, Training_Stage
 from utils.plot_utils import plot_loss_and_acc_curves, plot_lrs_scheduler, plot_confusion_matrix, ROC_curves
 from utils.data_split_utils import generator_cross_val_folds, stratified_train_val_split
 
+def _flatten_aug_config(aug_dict: dict | None) -> dict:
+    """Return a flat dict of augmentation params for wandb config and registry.
+
+    Keys are prefixed with ``aug/`` so they group together in wandb's UI and
+    can be used as sweep parameters or run-comparison filters.
+    When no augmentation config is provided, only ``aug/enabled: False`` is
+    returned so the column is always present.
+
+    Nested values (e.g. ``sigma: {type: uniform, low: 0.0, high: 1.0}``) are
+    recursively flattened so every leaf value is a plain scalar — safe for CSV
+    columns and wandb sweep filters.
+    """
+    if aug_dict is None:
+        return {'aug/enabled': False}
+    flat = {'aug/enabled': True}
+    for aug_name, params in aug_dict.items():
+        for k, v in params.items():
+            prefix = f'aug/{aug_name}/{k}'
+            if isinstance(v, dict):
+                for sub_k, sub_v in v.items():
+                    flat[f'{prefix}/{sub_k}'] = sub_v
+            else:
+                flat[prefix] = v
+    return flat
+
+
 def _append_registry(args, metrics_data: pd.DataFrame) -> None:
     """Append a one-row summary for this experiment to the shared registry CSV.
 
@@ -52,19 +78,88 @@ def _append_registry(args, metrics_data: pd.DataFrame) -> None:
     val_auc = _mean_auc('validation')
     test_auc = _mean_auc('test')
 
+    def _g(attr, default=''):
+        return getattr(args, attr, default)
+
     entry = {
+        # Identity
         'exp_id': args.exp_id,
+        'git_hash': _g('git_hash'),
         'date': datetime.now().strftime('%Y-%m-%d'),
+        # Task
         'dataset': args.dataset,
         'label': args.label,
-        'model': args.multi_scale_model or 'single',
+        'data_frac': args.data_frac,
+        'val_split': _g('val_split'),
+        'eval_scheme': _g('eval_scheme'),
+        'eval_set': _g('eval_set'),
+        'n_runs': _g('n_runs'),
+        'n_folds': _g('n_folds'),
+        # Feature extraction / backbone
+        'arch': _g('arch'),
+        'feature_extraction': _g('feature_extraction'),
+        'feat_dim': _g('feat_dim'),
+        'final_pooling': _g('final_pooling'),
+        'source_image': _g('source_image'),
+        'patching': _g('patching'),
+        'patch_size': _g('patch_size'),
+        'overlap': str(_g('overlap')),
+        'img_size': str(_g('img_size')),
+        'mean': _g('mean'),
+        'std': _g('std'),
+        # Model architecture
+        'mil_type': _g('mil_type'),
+        'multi_scale_model': args.multi_scale_model or 'single',
         'scales': str(list(args.scales)) if args.scales else '',
+        'fpn_dim': _g('fpn_dim'),
+        'fpn_in_channels': str(_g('fpn_in_channels')),
+        'upsample_method': _g('upsample_method'),
+        'norm_fpn': _g('norm_fpn'),
+        'deep_supervision': args.deep_supervision,
+        'scale_agg': _g('type_scale_aggregator'),
+        'nested_model': _g('nested_model'),
+        'region_agg': _g('type_region_aggregator'),
+        'region_pooling': _g('type_region_pooling'),
+        'region_encoder': _g('type_region_encoder'),
+        # Encoder
+        'encoder': _g('type_mil_encoder'),
+        'enc_dim': args.fcl_encoder_dim,
+        'enc_dropout': _g('fcl_dropout'),
+        'enc_blocks': _g('num_encoder_blocks'),
+        'sab_num_heads': _g('sab_num_heads'),
+        'isab_num_heads': _g('isab_num_heads'),
+        'pma_num_heads': _g('pma_num_heads'),
+        'trans_num_inds': _g('trans_num_inds'),
+        'trans_layer_norm': _g('trans_layer_norm'),
+        # Pooling
+        'pooling': args.pooling_type,
+        'attn_dim': _g('fcl_attention_dim'),
+        'map_prob_func': _g('map_prob_func'),
+        'drop_attn_pool': _g('drop_attention_pool'),
+        'drop_classhead': _g('drop_classhead'),
+        'drop_mha': _g('drop_mha'),
+        # Training
         'lr': args.lr,
         'bs': args.batch_size,
-        'pooling': args.pooling_type,
-        'scale_agg': args.type_scale_aggregator or '',
-        'enc_dim': args.fcl_encoder_dim,
-        'deep_supervision': args.deep_supervision,
+        'epochs': _g('epochs'),
+        'weight_decay': _g('weight_decay'),
+        'clip_grad': _g('clip_grad'),
+        'warmup_epochs': _g('warmup_epochs'),
+        'epochs_warmup': _g('epochs_warmup'),
+        'num_cycles': _g('num_cycles'),
+        'warmup_stage_epochs': _g('warmup_stage_epochs'),
+        'training_mode': _g('training_mode'),
+        'weighted_BCE': _g('weighted_BCE'),
+        'balanced_dataloader': _g('balanced_dataloader'),
+        'data_aug': _g('data_aug'),
+        'lamda': _g('lamda'),
+        # Feature-space augmentations
+        **{k.replace('/', '_'): v
+           for k, v in _flatten_aug_config(_g('aug_config_dict', None)).items()},
+        # Misc
+        'seed': _g('seed'),
+        'apex': _g('apex'),
+        # Results
         'val_auc': round(val_auc, 4) if not np.isnan(val_auc) else '',
         'test_auc': round(test_auc, 4) if not np.isnan(test_auc) else '',
         'output_path': str(args.output_path),
@@ -160,7 +255,8 @@ def do_experiments(args, device):
                 group=args.wandb_group,
                 tags=getattr(args, 'wandb_tags', None),
                 notes=getattr(args, 'wandb_notes', None),
-                config=vars(args),
+                config={**vars(args),
+                        **_flatten_aug_config(getattr(args, 'aug_config_dict', None))},
             )
 
             # train and validate model
@@ -348,7 +444,8 @@ def do_experiments(args, device):
                 group=args.wandb_group,
                 tags=getattr(args, 'wandb_tags', None),
                 notes=getattr(args, 'wandb_notes', None),
-                config=vars(args),
+                config={**vars(args),
+                        **_flatten_aug_config(getattr(args, 'aug_config_dict', None))},
             )
 
             # Get the next train/val split

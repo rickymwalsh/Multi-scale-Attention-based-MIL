@@ -7,6 +7,7 @@ from utils.generic_utils import seed_all
 #external imports
 import warnings
 import os
+import subprocess
 import hashlib
 import json
 import torch
@@ -21,34 +22,74 @@ from datetime import datetime
 from pathlib import Path
 
 
+# Keys in args that do NOT affect experiment outcome and are therefore excluded
+# from the deterministic experiment hash.
+_HASH_EXCLUDE_KEYS = {
+    # Filesystem / infrastructure
+    'output_dir', 'data_dir', 'feat_dir', 'img_dir', 'clip_chk_pt_path',
+    'csv_file', 'resume', 'test_example', 'aug_config',
+    # WandB metadata
+    'wandb_project', 'wandb_entity', 'wandb_mode', 'wandb_name',
+    'wandb_group', 'wandb_tags', 'wandb_notes',
+    # Runtime / hardware
+    'device', 'num_workers', 'apex', 'running_interactive',
+    'print_freq', 'log_freq',
+    # Mode switches
+    'train', 'evaluation', 'roi_eval', 'skip_val',
+    # Post-hoc ROI evaluation params (not training)
+    'roi_attention_threshold', 'visualize_num_images', 'quantile_threshold',
+    'max_bboxes', 'min_area', 'iou_threshold', 'roi_eval_scheme',
+    'roi_eval_set', 'iou_method', 'ap_method', 'eval_set',
+    # Restart offsets (resume semantics — same experiment, different start)
+    'start_run', 'start_fold',
+    # Derived / computed after the hash is produced
+    'exp_id', 'output_path', 'registry_path', 'BCE_weights',
+    # aug_config_dict is included separately (content, not path)
+    'aug_config_dict',
+}
+
+
+def _get_git_hash() -> str:
+    """Return the current git commit hash (short), or 'unknown' if unavailable."""
+    try:
+        return subprocess.check_output(
+            ['git', 'rev-parse', '--short', 'HEAD'],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except Exception:
+        return 'unknown'
+
+
 def _compute_exp_id(args, date_str: str) -> str:
     """Generate a hybrid date+hash experiment ID.
 
-    The 8-char hex hash is deterministic: identical key configs always produce
-    the same ID, enabling natural deduplication of re-runs.
+    The hash covers every meaningful argument (all args minus infrastructure
+    keys listed in _HASH_EXCLUDE_KEYS) plus the full feature-augmentation
+    config dict, so that any change to hyper-parameters produces a new ID.
+    Identical configs always map to the same ID, enabling natural
+    deduplication of re-runs.
+
+    Note: aug_config_dict must be loaded onto args before calling this.
     """
+    def _canonical(k, v):
+        """Convert a value to a JSON-serialisable, order-normalised form."""
+        if k == 'scales' and isinstance(v, (list, tuple)):
+            return sorted(v)           # order of scale list is irrelevant
+        if isinstance(v, (list, tuple)):
+            return list(v)             # tuples → lists for consistent JSON
+        if isinstance(v, Path):
+            return str(v)
+        return v
+
     hash_params = {
-        'dataset': args.dataset,
-        'label': args.label,
-        'mil_type': args.mil_type,
-        'pooling_type': args.pooling_type,
-        'map_prob_func': args.map_prob_func,
-        'multi_scale_model': args.multi_scale_model,
-        'scales': sorted(args.scales) if args.scales else None,
-        'type_scale_aggregator': args.type_scale_aggregator,
-        'deep_supervision': args.deep_supervision,
-        'type_mil_encoder': args.type_mil_encoder,
-        'fcl_encoder_dim': args.fcl_encoder_dim,
-        'fcl_dropout': args.fcl_dropout,
-        'drop_attention_pool': args.drop_attention_pool,
-        'lr': args.lr,
-        'batch_size': args.batch_size,
-        'fpn_dim': args.fpn_dim,
-        'nested_model': args.nested_model,
-        'type_region_aggregator': args.type_region_aggregator,
-        'feature_extraction': args.feature_extraction,
+        k: _canonical(k, v)
+        for k, v in vars(args).items()
+        if k not in _HASH_EXCLUDE_KEYS
     }
-    raw = json.dumps(hash_params, sort_keys=True)
+    # Include augmentation config *content* (not the path)
+    hash_params['aug_config_dict'] = getattr(args, 'aug_config_dict', None)
+
+    raw = json.dumps(hash_params, sort_keys=True, default=str)
     hash8 = hashlib.sha256(raw.encode()).hexdigest()[:8]
     return f"{date_str}_{hash8}"
 
@@ -276,7 +317,8 @@ def main(args):
         args.wandb_notes = (
             f"{args.dataset}/{args.label} | "
             f"model={args.multi_scale_model or 'single'} pool={args.pooling_type} "
-            f"lr={args.lr} bs={args.batch_size} enc_dim={args.fcl_encoder_dim}"
+            f"lr={args.lr} bs={args.batch_size} enc_dim={args.fcl_encoder_dim} "
+            f"git={args.git_hash}"
         )
 
         # From MammoCLIP's work
