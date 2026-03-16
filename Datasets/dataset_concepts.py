@@ -122,7 +122,7 @@ def collate_patch_features(batch):
     }
 
 class Generic_MIL_Dataset(Dataset):
-    def __init__(self, args, df, transform, split = 'train'):
+    def __init__(self, args, df, transform, split='train', feature_augmentor=None):
         self.args = args
         self.df = df
 
@@ -144,11 +144,15 @@ class Generic_MIL_Dataset(Dataset):
 
         self.multi_scale_model = args.multi_scale_model
         self.scales = args.scales
+        self.feature_augmentor = feature_augmentor
 
         # Preload training/val features into memory to avoid per-batch file I/O.
         self._cache = None
+        self._grid_shapes = None
         if split in ['train', 'val'] and self.transform is None and args.feature_extraction == 'offline':
             self._preload_features()
+            if feature_augmentor is not None:
+                self._preload_grid_shapes()
 
     def _ensure_sorted_file(self, bag_dir, feat_pyramid_level=None):
         """Return path to a pre-sorted feature file, creating it if it does not exist.
@@ -248,6 +252,64 @@ class Generic_MIL_Dataset(Dataset):
         _gc.collect()
         _gc.freeze()
 
+    def _preload_grid_shapes(self):
+        """Load the 2D spatial grid dimensions (H, W) for each bag.
+
+        Required by spatially-aware augmentations (simulated_low_res,
+        mirroring, gaussian_blur).  Patches are sorted row-major (y then x),
+        so the grid is reconstructed as x.view(H, W, D).
+
+        The structure of _grid_shapes[idx] mirrors the structure of
+        _cache[idx][0]:
+          - single-scale : (H, W) tuple
+          - msp          : {scale: (H, W)} dict
+          - fpn          : [(H, W), (H, W)] list  (C4 and C5 share coords)
+        """
+        print(f"Preloading grid shapes for {len(self.df)} samples...")
+        self._grid_shapes = [None] * len(self.df)
+
+        for idx in range(len(self.df)):
+            row = self.df.iloc[idx]
+            patient_id = str(row['patient_id'])
+            image_id = str(row['image_id'])
+
+            if self.multi_scale_model is None:
+                coords_path = self.dir_path / patient_id / image_id / 'info_patches.h5'
+                with h5py.File(coords_path, 'r') as _f:
+                    bag_coords = np.array(_f['coords'])
+                n_rows = len(np.unique(bag_coords[:, 1]))
+                n_cols = len(np.unique(bag_coords[:, 0]))
+                self._grid_shapes[idx] = (n_rows, n_cols)
+
+            elif self.multi_scale_model == 'msp':
+                # Each scale has its own patch grid (larger patches → smaller grid)
+                grid_shape = {}
+                for scale in self.scales:
+                    coords_path = (
+                        self.dir_path / f'patch_size-{scale}' / patient_id / image_id
+                        / 'info_patches.h5'
+                    )
+                    with h5py.File(coords_path, 'r') as _f:
+                        bag_coords = np.array(_f['coords'])
+                    n_rows = len(np.unique(bag_coords[:, 1]))
+                    n_cols = len(np.unique(bag_coords[:, 0]))
+                    grid_shape[scale] = (n_rows, n_cols)
+                self._grid_shapes[idx] = grid_shape
+
+            elif self.multi_scale_model in ['fpn', 'backbone_pyramid']:
+                # C4 and C5 share the same info_patches.h5
+                coords_path = self.dir_path / patient_id / image_id / 'info_patches.h5'
+                with h5py.File(coords_path, 'r') as _f:
+                    bag_coords = np.array(_f['coords'])
+                n_rows = len(np.unique(bag_coords[:, 1]))
+                n_cols = len(np.unique(bag_coords[:, 0]))
+                self._grid_shapes[idx] = [(n_rows, n_cols), (n_rows, n_cols)]
+
+        print(f"Grid shape preloading complete ({len(self.df)} samples)")
+        import gc as _gc
+        _gc.collect()
+        _gc.freeze()
+
     def __len__(self):
         return len(self.df)
 
@@ -311,6 +373,11 @@ class Generic_MIL_Dataset(Dataset):
         # Fast path: return preloaded features
         if self._cache is not None:
             x, label = self._cache[idx]
+            if self.feature_augmentor is not None:
+                x = self.feature_augmentor(
+                    x,
+                    grid_shape=self._grid_shapes[idx] if self._grid_shapes is not None else None,
+                )
             return {'x': x, 'y': label}
 
         data = self.df.iloc[idx]

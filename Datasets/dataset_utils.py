@@ -377,17 +377,29 @@ def MIL_dataloader(split_df, split, args):
                                                   )
                                                  ])
         
-    else:     
-        # Use pre-extracted features (no image transforms needed) 
+    else:
+        # Use pre-extracted features (no image transforms needed)
         tfm = None
-        
+
+    # Feature-space augmentor: only for offline training
+    from Datasets.feature_augmentations import OfflineFeatureAugmentor
+    aug_config_dict = getattr(args, 'aug_config_dict', None)
+    feature_augmentor = None
+    if (split == 'train'
+            and args.feature_extraction == 'offline'
+            and aug_config_dict is not None):
+        feature_augmentor = OfflineFeatureAugmentor(aug_config_dict)
+
     if args.roi_eval:
         # Use ROI-specific dataset for detection evaluation
         split_dataset = Generic_MIL_Dataset_Detection(args=args, df=split_df, transform=tfm)
 
     else:
         # Standard MIL dataset (split passed so only train split preloads into cache)
-        split_dataset = Generic_MIL_Dataset(args=args, df=split_df, transform=tfm, split=split)
+        split_dataset = Generic_MIL_Dataset(
+            args=args, df=split_df, transform=tfm, split=split,
+            feature_augmentor=feature_augmentor,
+        )
 
     # Val/test splits load from disk (no cache); use at least 1 worker so disk I/O
     # is prefetched in the background and does not stall the GPU between batches.

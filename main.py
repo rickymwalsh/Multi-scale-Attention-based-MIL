@@ -172,6 +172,11 @@ def config():
     # Data augmentation settings
     parser.add_argument("--balanced-dataloader", default='n', type=str,help='Enable weighted sampling during training (default: False).')
     parser.add_argument("--data_aug", action='store_true', default=False)
+    parser.add_argument(
+        '--aug_config', default=None, type=str,
+        help='Path to data_augmentation.yaml for feature-space augmentations '
+             '(offline training only). If None, no feature augmentations are applied.'
+    )
     
     parser.add_argument("--alpha", default=10, type=float)
     parser.add_argument("--sigma", default=15, type=float)
@@ -249,7 +254,21 @@ def main(args):
 
     if args.train:
 
-        # Deterministic experiment ID: date prefix + 8-char config hash
+        # Load feature augmentation config BEFORE computing the experiment ID
+        # so that its content is included in the hash.
+        args.aug_config_dict = None
+        if args.aug_config is not None:
+            with open(args.aug_config, 'r') as _f:
+                args.aug_config_dict = yaml.safe_load(_f)
+            print(f"Feature augmentation config loaded from: {args.aug_config}")
+        else:
+            print("No feature augmentation config specified; running without feature augmentations.")
+
+        # Capture git state before any file writes
+        args.git_hash = _get_git_hash()
+        print(f"git commit: {args.git_hash}")
+
+        # Deterministic experiment ID: date prefix + 8-char hash of all meaningful args
         exp_id = _compute_exp_id(args, now.replace('-', ''))
         args.exp_id = exp_id
         args.wandb_group = args.wandb_name or exp_id
@@ -274,16 +293,26 @@ def main(args):
 
         os.makedirs(args.output_path, exist_ok=True)
         print(f"output_path: {args.output_path}")
-    
+
+        # Persist augmentation config alongside the saved model
+        if args.aug_config is not None:
+            import shutil
+            shutil.copy(args.aug_config,
+                        os.path.join(args.output_path, 'data_augmentation.yaml'))
+
+        # Save git hash as a standalone file so it's always findable next to the model
+        with open(os.path.join(args.output_path, 'git_hash.txt'), 'w') as _f:
+            _f.write(args.git_hash + '\n')
+
         # Convert any PosixPath in args.__dict__ to a string
         args_dict = {k: str(v) if isinstance(v, Path) else v for k, v in args.__dict__.items()}
 
-        # Cache the args as a text string to save them in the output dir 
+        # Cache the args as a text string to save them in the output dir
         args_text = yaml.safe_dump(args_dict, default_flow_style=False)
 
         with open(os.path.join(args.output_path, "args.yaml"), 'w') as f:
             f.write(args_text)
-        
+
         do_experiments(args, device)
 
     elif args.evaluation:
