@@ -1,0 +1,23 @@
+# Ablation: simulated low resolution only (all other augmentations disabled).
+# Parameters match the current data_augmentation.yaml baseline.
+
+gaussian_noise:
+  p: 0.0
+  sigma: 0.01
+  delta_p: 1.0
+
+rotation_scaling:
+  p: 0.0
+  scale_range: [0.9, 1.1]
+
+simulated_low_res:
+  p: 0.1
+  factor_range: [1, 2]
+
+mirroring:
+  p: 0.0
+
+gaussian_blur:
+  p: 0.0
+  kernel_size: 5
+  sigma: 1.0

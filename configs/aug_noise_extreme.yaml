@@ -1,0 +1,27 @@
+# Extreme: gaussian noise only with very high sigma.
+# sigma uniform 5-15 with delta_p=1.0 will obliterate feature magnitudes
+# (typical normalised feature norms ~1-5), expected to cause deterioration.
+
+gaussian_noise:
+  p: 1.0
+  sigma:
+    type: uniform
+    low: 5.0
+    high: 15.0
+  delta_p: 1.0
+
+rotation_scaling:
+  p: 0.0
+  scale_range: [0.9, 1.1]
+
+simulated_low_res:
+  p: 0.0
+  factor_range: [1, 2]
+
+mirroring:
+  p: 0.0
+
+gaussian_blur:
+  p: 0.0
+  kernel_size: 5
+  sigma: 1.0

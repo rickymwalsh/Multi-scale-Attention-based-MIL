@@ -1,0 +1,24 @@
+# Extreme: simulated low resolution only with factor 6-8 applied every sample.
+# Compresses the patch grid to ~1/50th of original patches then upsamples back;
+# most spatial detail is destroyed, expected to cause deterioration.
+
+gaussian_noise:
+  p: 0.0
+  sigma: 0.01
+  delta_p: 1.0
+
+rotation_scaling:
+  p: 0.0
+  scale_range: [0.9, 1.1]
+
+simulated_low_res:
+  p: 1.0
+  factor_range: [6, 8]
+
+mirroring:
+  p: 0.0
+
+gaussian_blur:
+  p: 0.0
+  kernel_size: 5
+  sigma: 1.0
