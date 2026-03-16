@@ -228,12 +228,14 @@ class Gated_Attn_Net(nn.Module):
             A = sparsemax(A_unormalized, dim=1)  
         elif self.map_prob_func == 'entmax':
             A = entmax15(A_unormalized, dim=1)  
+        else:
+            raise ValueError(f"Unknown map probability function: {self.map_prob_func}")
                         
         # Apply mask again after attention
         if mask is not None:
-            A = A.masked_fill(mask, 0.0)
+            A = A.masked_fill(mask, 0.0)  # type: ignore
         
-        A = A.permute(0, 2, 1)  # batch_size x 1 x N
+        A = A.permute(0, 2, 1)  # batch_size x 1 x N  # type: ignore
             
         pooled_feature = torch.matmul(A, x)  #(Batch_size, 1, embedding_size) 
 

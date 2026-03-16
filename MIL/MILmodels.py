@@ -156,8 +156,8 @@ class MIL(nn.Module):
     
     def __init__(self,
                 is_training: bool = True, 
-                multi_scale_model: str = None,
-                inst_encoder: nn.Module = None, 
+                multi_scale_model: Optional[str] = None,
+                inst_encoder: Optional[nn.Module] = None, 
                 embedding_size: int = 512, 
                 sigmoid_func: bool = True,
                 num_classes: int = 1,
@@ -214,7 +214,7 @@ class MIL(nn.Module):
             self.aggregator = self.MILAggregator(fcl_encoder_dim)
             self.classifier = head(fcl_encoder_dim, num_classes, sigmoid_func, drop_classhead)
 
-    def MILEncoder(self, dim_in, dim_hidden, scale = None, type_encoder = None) -> None:
+    def MILEncoder(self, dim_in, dim_hidden, scale = None, type_encoder = None) -> nn.ModuleList:
         """
         Builds MIL encoder module (MLP, SAB, or ISAB).
         """
@@ -288,6 +288,7 @@ class EmbeddingMIL(MIL):
         
         self.mil_type = mil_type.lower()
         self.num_inst = num_inst 
+        mil_args = mil_args if mil_args is not None else {}
         
         self.patch_scores = None 
         
@@ -352,6 +353,7 @@ class PyramidalMILmodel(MIL):
         
         self.mil_type = 'embedding'
         self.num_inst = num_inst 
+        mil_args = mil_args if mil_args is not None else {}
         
         super().__init__(**mil_args)
 
@@ -382,7 +384,7 @@ class PyramidalMILmodel(MIL):
         elif self.type_scale_aggregator in ['max_p', 'mean_p']:
             
             self.side_classifiers = nn.ModuleDict({f'classifier_{scale}': head(self.fcl_encoder_dim, self.num_classes, self.sigmoid_func, self.drop_classhead) for scale in self.scales})
-  
+
         self.patch_scores = {}
         self.scale_scores = None 
 
@@ -488,7 +490,7 @@ class PyramidalMILmodel(MIL):
             x_patches = x_pyramid[f'feat_{self.scales.index(scale)}'] # Get the correct scale feature map
 
             # Pass through scale-specific MIL encoder
-            for block_encoder in self.side_inst_aggregator['encoders'][f'encoder_{scale}']:
+            for block_encoder in self.side_inst_aggregator['encoders'][f'encoder_{scale}']:  # type:ignore
                 if isinstance(block_encoder, (SetAttentionBlock, InducedSetAttentionBlock)):
                     x_patches = block_encoder(x_patches, bag_mask)
                 else: 
@@ -497,10 +499,10 @@ class PyramidalMILmodel(MIL):
             # Apply the scale-specific aggregator to the encoded output to obtain the bag representation: 
             # (Batch_size, N, embedding_size) -> (Batch_size, embedding_size)
             if self.pooling_type in ["attention", "gated-attention", "pma"]:
-                x_patches, A = self.side_inst_aggregator['aggregators'][f'aggregator_{scale}'](x_patches, bag_mask)
+                x_patches, A = self.side_inst_aggregator['aggregators'][f'aggregator_{scale}'](x_patches, bag_mask)  # type:ignore
                 self.save_patch_scores(A, scale)
             else:
-                x_patches = self.side_inst_aggregator['aggregators'][f'aggregator_{scale}'](x_patches, bag_mask)
+                x_patches = self.side_inst_aggregator['aggregators'][f'aggregator_{scale}'](x_patches, bag_mask)  # type:ignore
 
             # Save scale embeddings and deep supervision output
             if self.type_scale_aggregator in ['concatenation', 'gated-attention']: 
@@ -541,7 +543,7 @@ class PyramidalMILmodel(MIL):
 
             if self.deep_supervision: 
                 return x.squeeze(1), deep_spv_outputs # (Batch_size)
- 
+
             return x.squeeze(1)
 
         return deep_spv_outputs # (Batch_size)
@@ -571,6 +573,7 @@ class NestedPyramidalMILmodel(MIL):
         
         self.mil_type = 'embedding'
         self.num_inst = num_inst 
+        mil_args = mil_args if mil_args is not None else {}
         
         super().__init__(**mil_args)
         
@@ -594,7 +597,7 @@ class NestedPyramidalMILmodel(MIL):
             
             if deep_supervision:
                 self.side_classifiers = nn.ModuleDict({f'classifier_{scale}': head(self.fcl_encoder_dim, self.num_classes, self.sigmoid_func, self.drop_classhead) for scale in self.scales})
- 
+
             self.scale_aggregator = self.ScaleAggregator(type_scale_aggregator, dim_in = self.fcl_encoder_dim)
 
             # final classifier head at the multi-scale aggregation level
@@ -787,7 +790,7 @@ class NestedPyramidalMILmodel(MIL):
 
             if self.deep_supervision: 
                 return x.squeeze(1), deep_spv_outputs # (Batch_size)
- 
+
             return x.squeeze(1)
 
         return deep_spv_outputs # (Batch_size)
