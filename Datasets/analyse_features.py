@@ -460,7 +460,7 @@ def main():
     )
     parser.add_argument("--feat_dir", type=str, required=True,
                         help="Root feature directory (e.g. /data/walsh/datasets/vindr-mammo-mil-b2).")
-    parser.add_argument("--multi_scale_model", type=str, default=None,
+    parser.add_argument("--multi_scale_model", type=str, default='fpn',
                         choices=["fpn", "backbone_pyramid", "msp", None],
                         help="Feature storage layout. None = single-scale.")
     parser.add_argument("--scales", type=int, nargs="+", default=[16],
