@@ -117,7 +117,7 @@ def config():
     parser = argparse.ArgumentParser()
     
     # Folders
-    parser.add_argument('--output_dir', metavar='DIR',default='Mammo-CLIP-output/out_splits_new', help='path to output logs')
+    parser.add_argument('--output_dir', metavar='DIR', default='results', help='path to output logs')
     parser.add_argument("--data_dir",default="datasets/Vindir-mammoclip",type=str, help="Path to data file")
     parser.add_argument("--clip_chk_pt_path", default=None, type=str, help="Path to Mammo-CLIP chkpt")
     parser.add_argument("--csv_file", default="grouped_df.csv", type=str, help="data csv file")
