@@ -856,14 +856,12 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
         labels = data['y'].float().to(device)
 
         # Feature-space augmentation on GPU.
+        # Pass inputs directly so the augmentor's dict/list/tensor branches
+        # fire correctly — dict keys (e.g. C4, C5) are used as scale
+        # identifiers for per-scale noise configs.
         _aug = getattr(args, '_feature_augmentor', None)
         if _aug is not None:
-            if isinstance(inputs, dict):
-                inputs = {k: _aug(v) for k, v in inputs.items()}
-            elif isinstance(inputs, list):
-                inputs = [_aug(t) for t in inputs]
-            else:
-                inputs = _aug(inputs)
+            inputs = _aug(inputs)
 
         # Wrap forward pass with autocast
         with torch.cuda.amp.autocast(enabled=args.apex):
