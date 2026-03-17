@@ -7,23 +7,30 @@ gaussian_noise:
   p: 1.0
   sigma:
     type: uniform       # sampled fresh each __getitem__ call
-    low: 0.0
-    high: 6.0
+    low: 3.0
+    high: 9.0
   delta_p: 0.75         # probability each element receives noise (Bernoulli mask); 1.0 = all elements
 
 rotation_scaling:
   p: 0.25
+  angle:
+    type: uniform             # sampled fresh each __getitem__ call
+    low: -15.0
+    high: 15.0
   scale_range: [0.9, 1.1]   # random uniform scale sampled in [scale_range[0], scale_range[1]]
 
 
 simulated_low_res:
-  p: 0.1
+  p: 0.25
   factor_range: [1, 2]      # random integer downsampling factor sampled uniformly in this range
 
 mirroring:
   p: 0.5               # each spatial axis (horizontal, vertical) then flipped independently at p=0.5
 
 gaussian_blur:
-  p: 0.1
+  p: 0.2
   kernel_size: 5       # must be odd; clamped to min(H_grid, W_grid) automatically
-  sigma: 1.0
+  sigma: 
+    type: uniform       # sampled fresh each __getitem__ call
+    low: 0.5
+    high: 1.5

@@ -1,6 +1,6 @@
-# Extreme: rotation & scaling only with highly distorted scale range [0.1, 10.0].
-# Applied every sample (p=1.0); scale factor 0.1-10x destroys consistent feature norms,
-# expected to cause deterioration.
+# Extreme: rotation & scaling only with large angle range [-45, 45] degrees and
+# highly distorted scale range [0.1, 10.0]. Applied every sample (p=1.0).
+# Expected to cause deterioration due to severe spatial distortion and scale changes.
 
 gaussian_noise:
   p: 0.0
@@ -9,7 +9,11 @@ gaussian_noise:
 
 rotation_scaling:
   p: 1.0
-  scale_range: [0.1, 10.0]
+  angle:
+    type: uniform
+    low: -60.0
+    high: 60.0
+  scale_range: [0.2, 5]
 
 simulated_low_res:
   p: 0.0

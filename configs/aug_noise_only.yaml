@@ -3,14 +3,15 @@
 
 gaussian_noise:
   p: 1.0
-  sigma:
-    type: uniform
-    low: 0.0
-    high: 6.0
-  delta_p: 0.75
+  sigma: 14
+    # type: uniform
+    # low: 3.0
+    # high: 9.0
+  delta_p: 1.0
 
 rotation_scaling:
   p: 0.0
+  angle: 15.0
   scale_range: [0.9, 1.1]
 
 simulated_low_res:
@@ -23,4 +24,4 @@ mirroring:
 gaussian_blur:
   p: 0.0
   kernel_size: 5
-  sigma: 1.0
+  sigma: 14

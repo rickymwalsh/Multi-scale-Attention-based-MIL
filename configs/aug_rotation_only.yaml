@@ -7,7 +7,11 @@ gaussian_noise:
   delta_p: 1.0
 
 rotation_scaling:
-  p: 0.25
+  p: 0.75
+  angle:
+    type: uniform
+    low: -15.0
+    high: 15.0
   scale_range: [0.9, 1.1]
 
 simulated_low_res:

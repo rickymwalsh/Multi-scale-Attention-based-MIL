@@ -1,0 +1,20 @@
+gaussian_noise:
+  p: 1.0
+  delta_p: 1.0
+  per_scale:
+    C4:
+      sigma: 12
+    C5:
+      sigma: 6
+
+rotation_scaling:
+  p: 0.0
+
+simulated_low_res:
+  p: 0.0
+
+mirroring:
+  p: 0.0
+
+gaussian_blur:
+  p: 0.0

@@ -8,10 +8,11 @@ gaussian_noise:
 
 rotation_scaling:
   p: 0.0
+  angle: 15.0
   scale_range: [0.9, 1.1]
 
 simulated_low_res:
-  p: 0.1
+  p: 0.75
   factor_range: [1, 2]
 
 mirroring:

@@ -9,7 +9,7 @@ fi
 python main.py \
   --train \
   --label "Suspicious_Calcification" \
-  --output_dir /home/walsh/gaze/gazeMIL/results/vindr-mammo-b2 \
+  --output_dir results \
   --data_dir '' \
   --clip_chk_pt_path /home/walsh/.cache/huggingface/hub/models--shawn24--Mammo-CLIP/snapshots/2f356926a00fc3f0d9fdad1193c1464fd9adf564/Pre-trained-checkpoints/b2-model-best-epoch-10.tar \
   --arch upmc_breast_clip_det_b2_period_n_ft \

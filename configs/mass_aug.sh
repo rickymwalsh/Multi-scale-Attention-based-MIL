@@ -3,6 +3,7 @@
 gpu_id=${1}
 aug_config=${2:-configs/data_augmentation.yaml}
 
+
 if [ -z "$gpu_id" ]; then
   echo "No GPU ID provided. Using default GPU (0)."
   gpu_id=0
@@ -11,7 +12,7 @@ fi
 .venv/bin/python3 main.py \
   --train \
   --label "Mass" \
-  --output_dir /home/walsh/gaze/gazeMIL/results/vindr-mammo-b2 \
+  --output_dir results \
   --data_dir '' \
   --clip_chk_pt_path /home/walsh/.cache/huggingface/hub/models--shawn24--Mammo-CLIP/snapshots/2f356926a00fc3f0d9fdad1193c1464fd9adf564/Pre-trained-checkpoints/b2-model-best-epoch-10.tar \
   --arch upmc_breast_clip_det_b2_period_n_ft \
@@ -21,9 +22,9 @@ fi
   --dataset 'ViNDr' \
   --feature_extraction "offline" \
   --epochs 30 \
-  --batch-size 8 \
+  --batch-size 32 \
   --eval_scheme 'kruns_train+val+test' \
-  --n_runs 5 \
+  --n_runs 1 \
   --lr 5.0e-5 \
   --balanced-dataloader 'y' \
   --mil_type 'pyramidal_mil' \
@@ -37,5 +38,5 @@ fi
   --deep_supervision \
   --scales 16 32 128 \
   --device cuda:$gpu_id \
-  --num-workers 16 \
+  --num-workers 8 \
   --aug_config $aug_config
