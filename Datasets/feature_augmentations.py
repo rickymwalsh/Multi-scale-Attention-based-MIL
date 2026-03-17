@@ -3,15 +3,17 @@
 Augmentations are applied stochastically at __getitem__ time so each
 training epoch sees independently augmented bags.
 
-Spatially-aware augmentations (simulated_low_res, mirroring, gaussian_blur)
-accept a ``grid_shape=(H, W)`` argument to reconstruct the 2D patch grid
-from the sorted (N=H*W, D) feature tensor.  Patches are sorted row-major
-(y ascending, then x ascending), so ``x.view(H, W, D)`` gives the correct
-spatial layout.
+All augmentations accept ``x`` of shape ``(N, *feat_shape)`` and return
+the same shape.  Spatially-aware augmentations (rotation_scaling,
+simulated_low_res, mirroring, gaussian_blur) require ``x.dim() == 4``,
+i.e. ``(N, C, H, W)`` — the format in which FPN patch features are stored.
+For flat ``(N, D)`` features these augmentations are silently skipped;
+only gaussian_noise applies regardless of shape.
 """
 
 from __future__ import annotations
 
+import math
 import random
 import torch
 import torch.nn.functional as F
@@ -24,8 +26,8 @@ def _resolve(value):
     Scalar values (int, float) are returned as-is.  A dict with a ``type``
     key is treated as a distribution specification and sampled once:
 
-        type: uniform   → random.uniform(low, high)
-        type: normal    → abs(random.gauss(mean, std))   (always positive)
+        type: uniform    → random.uniform(low, high)
+        type: normal     → abs(random.gauss(mean, std))   (always positive)
         type: loguniform → exp(uniform(log(low), log(high)))
 
     This allows YAML entries such as::
@@ -45,7 +47,6 @@ def _resolve(value):
     if dist == 'normal':
         return abs(random.gauss(float(value['mean']), float(value['std'])))
     if dist == 'loguniform':
-        import math
         lo, hi = math.log(float(value['low'])), math.log(float(value['high']))
         return math.exp(random.uniform(lo, hi))
     raise ValueError(f"Unknown distribution type '{dist}' in augmentation config")
@@ -64,11 +65,34 @@ class OfflineFeatureAugmentor:
 
     Supported augmentation keys
     ---------------------------
-    gaussian_noise      : p, sigma
-    rotation_scaling    : p, scale_range ([lo, hi])
-    simulated_low_res   : p, factor_range ([min_int, max_int])
-    mirroring           : p  (per-axis flip probability is fixed at 0.5 internally)
-    gaussian_blur       : p, kernel_size (odd int), sigma
+    gaussian_noise      : p, sigma, delta_p
+                          Works on any input shape.
+                          Optionally accepts a ``per_scale`` sub-dict to apply
+                          different noise parameters to individual scale keys
+                          (e.g. C4, C5) when the input is a dict.  Each entry
+                          in ``per_scale`` may override ``sigma`` and/or
+                          ``delta_p``; ``p`` is always taken from the top level
+                          (the roll is shared across all scales).  Example::
+
+                              gaussian_noise:
+                                p: 0.5
+                                sigma: 0.05
+                                per_scale:
+                                  C4:
+                                    sigma: 0.03
+                                  C5:
+                                    sigma: 0.10
+                                    delta_p: 0.8
+
+    rotation_scaling    : p, angle (degrees; scalar or distribution),
+                          scale_range ([lo, hi]).
+                          Requires (N, C, H, W) input; skipped otherwise.
+    simulated_low_res   : p, factor_range ([min_int, max_int]).
+                          Requires (N, C, H, W) input; skipped otherwise.
+    mirroring           : p.  Per-axis flip probability fixed at 0.5 internally.
+                          Requires (N, C, H, W) input; skipped otherwise.
+    gaussian_blur       : p, kernel_size (odd int), sigma.
+                          Requires (N, C, H, W) input; skipped otherwise.
     """
 
     def __init__(self, config: dict):
@@ -81,38 +105,28 @@ class OfflineFeatureAugmentor:
     def __call__(
         self,
         x: Union[torch.Tensor, dict, list],
-        grid_shape=None,
     ) -> Union[torch.Tensor, dict, list]:
         """Apply the augmentation pipeline to a bag.
 
         Parameters
         ----------
-        x : Tensor (N, D) | dict {scale: Tensor} | list [Tensor, ...]
-        grid_shape : (H, W) | dict {scale: (H, W)} | list [(H,W), ...] | None
-            Spatial grid dimensions matching the structure of ``x``.
-            Required for simulated_low_res, mirroring, and gaussian_blur.
+        x : Tensor (N, *feat_shape) | dict {scale: Tensor} | list [Tensor, ...]
         """
         if isinstance(x, torch.Tensor):
-            return self._augment_tensor(x, grid_shape)
+            return self._augment_tensor(x)
         elif isinstance(x, dict):
+            # Pre-roll the gaussian_noise coin once so all scales share the
+            # same application decision, then pass per-scale config overrides.
+            noise_fires = (
+                'gaussian_noise' in self.cfg
+                and torch.rand(1).item() < self.cfg['gaussian_noise']['p']
+            )
             return {
-                k: self._augment_tensor(
-                    v,
-                    grid_shape[k] if isinstance(grid_shape, dict) else grid_shape,
-                )
+                k: self._augment_tensor(v, scale_key=k, noise_fires=noise_fires)
                 for k, v in x.items()
             }
         elif isinstance(x, list):
-            return [
-                self._augment_tensor(
-                    t,
-                    grid_shape[i] if isinstance(grid_shape, (list, tuple)) and not (
-                        len(grid_shape) == 2
-                        and isinstance(grid_shape[0], int)
-                    ) else grid_shape,
-                )
-                for i, t in enumerate(x)
-            ]
+            return [self._augment_tensor(t) for t in x]
         else:
             raise TypeError(
                 f"OfflineFeatureAugmentor: unsupported x type {type(x)}"
@@ -123,66 +137,64 @@ class OfflineFeatureAugmentor:
     # ------------------------------------------------------------------
 
     def _augment_tensor(
-        self, x: torch.Tensor, grid_shape=None
+        self,
+        x: torch.Tensor,
+        *,
+        scale_key: str | None = None,
+        noise_fires: bool | None = None,
     ) -> torch.Tensor:
-        """Apply each enabled augmentation in sequence to a single (N, ...) tensor.
-
-        Features may be stored as (N, D) or higher-dimensional (e.g. (N, D1, D2)
-        for FPN levels that retain spatial structure).  All augmentation methods
-        assume 2-D input, so we flatten to (N, D_flat) before the pipeline and
-        restore the original trailing shape afterwards.  N is always preserved.
-        """
         orig_dtype = x.dtype
-        orig_shape = x.shape  # e.g. (N,) or (N, D) or (N, D1, D2)
-
         # Cast to float32: always creates a NEW tensor (safe to mutate),
         # and avoids float16 underflow in noise / Gaussian ops.
         x = x.float()
 
-        # Flatten to 2-D so every augmentation method sees (N, D).
-        if x.dim() != 2:
-            x = x.flatten(start_dim=1)  # (N, D1*D2*...)
-
         cfg = self.cfg
 
-        if 'gaussian_noise' in cfg and torch.rand(1).item() < cfg['gaussian_noise']['p']:
-            x = self._gaussian_noise(
-                x,
-                _resolve(cfg['gaussian_noise']['sigma']),
-                _resolve(cfg['gaussian_noise'].get('delta_p', 1.0)),
+        if 'gaussian_noise' in cfg:
+            # When called from the dict branch, the coin has already been
+            # rolled (noise_fires is True/False).  Otherwise roll it here.
+            fires = noise_fires if noise_fires is not None else (
+                torch.rand(1).item() < cfg['gaussian_noise']['p']
             )
+            if fires:
+                noise_cfg = cfg['gaussian_noise']
+                # Merge per-scale overrides when a scale key is given.
+                per_scale = noise_cfg.get('per_scale', {})
+                if scale_key is not None and scale_key in per_scale:
+                    noise_cfg = {**noise_cfg, **per_scale[scale_key]}
+                x = self._gaussian_noise(
+                    x,
+                    _resolve(noise_cfg['sigma']),
+                    _resolve(noise_cfg.get('delta_p', 1.0)),
+                )
 
         if 'rotation_scaling' in cfg and torch.rand(1).item() < cfg['rotation_scaling']['p']:
             lo, hi = cfg['rotation_scaling']['scale_range']
-            x = self._rotation_scaling(x, _resolve(lo), _resolve(hi))
+            x = self._rotation_scaling(
+                x,
+                _resolve(cfg['rotation_scaling']['angle']),
+                _resolve(lo),
+                _resolve(hi),
+            )
 
         if 'simulated_low_res' in cfg and torch.rand(1).item() < cfg['simulated_low_res']['p']:
-            if grid_shape is not None:
-                x = self._simulated_low_res(
-                    x, grid_shape, cfg['simulated_low_res']['factor_range']
-                )
+            x = self._simulated_low_res(x, cfg['simulated_low_res']['factor_range'])
 
         if 'mirroring' in cfg and torch.rand(1).item() < cfg['mirroring']['p']:
-            if grid_shape is not None:
-                x = self._mirroring(x, grid_shape)
+            x = self._mirroring(x)
 
         if 'gaussian_blur' in cfg and torch.rand(1).item() < cfg['gaussian_blur']['p']:
-            if grid_shape is not None:
-                x = self._gaussian_blur(
-                    x,
-                    grid_shape,
-                    _resolve(cfg['gaussian_blur']['kernel_size']),
-                    _resolve(cfg['gaussian_blur']['sigma']),
-                )
-
-        # Restore original trailing shape (N unchanged; D_flat splits back).
-        if len(orig_shape) != 2:
-            x = x.view(orig_shape[0], *orig_shape[1:])
+            x = self._gaussian_blur(
+                x,
+                _resolve(cfg['gaussian_blur']['kernel_size']),
+                _resolve(cfg['gaussian_blur']['sigma']),
+            )
 
         return x.to(orig_dtype)
 
     # ------------------------------------------------------------------
-    # Individual augmentations (accept/return float32, shape (N, D))
+    # Individual augmentations
+    # Each accepts (N, *feat_shape) and returns the same shape.
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -190,57 +202,77 @@ class OfflineFeatureAugmentor:
         """Add masked Gaussian noise: x + noise * delta.
 
         ``noise`` ~ N(0, sigma²), ``delta`` ~ Bernoulli(delta_p) element-wise.
-        When delta_p=1.0 (default) all elements receive noise; lower values
-        sparsify the corruption so only a fraction of feature values are perturbed.
-        ``sigma`` is resolved before this call so it is always a plain float.
+        When delta_p=1.0 all elements receive noise; lower values sparsify the
+        corruption so only a fraction of feature values are perturbed.
+        Works on any input shape.
         """
         noise = sigma * torch.randn_like(x)
         if delta_p < 1.0:
-            delta = (torch.rand_like(x) < delta_p).to(x.dtype)
-            noise = noise * delta
+            noise = noise * (torch.rand_like(x) < delta_p).to(x.dtype)
         return x + noise
 
     @staticmethod
     def _rotation_scaling(
-        x: torch.Tensor, scale_lo: float, scale_hi: float
+        x: torch.Tensor,
+        angle_deg: float,
+        scale_lo: float,
+        scale_hi: float,
     ) -> torch.Tensor:
-        """Random isotropic scale followed by a Householder reflection.
+        """Rotate and isotropically scale the spatial feature maps.
 
-        The Householder transform H(x) = x − 2(x·v)vᵀ applies an orthogonal
-        reflection to each row of x.  Cost: O(N·D) — no D×D matrix.
+        Requires ``x.dim() == 4`` i.e. ``(N, C, H, W)``; returns x unchanged
+        for flat inputs.  The same transformation is applied to all N feature
+        maps (simulating a consistently rotated view across the bag).
+
+        Uses F.affine_grid + F.grid_sample (bilinear, border padding) so H and
+        W are preserved and out-of-bounds positions use edge values.
+
+        Parameters
+        ----------
+        angle_deg : float
+            Rotation angle in degrees.  Positive = counter-clockwise.
+        scale_lo, scale_hi : float
+            Isotropic scale factor sampled uniformly in [scale_lo, scale_hi].
+            Scale > 1 zooms in; scale < 1 zooms out.
         """
-        # Random isotropic scale
-        scale = scale_lo + (scale_hi - scale_lo) * torch.rand(1).item()
-        x = x * scale
+        if x.dim() != 4:
+            return x
 
-        # Householder reflection with a random unit vector
-        D = x.shape[1]
-        v = torch.randn(D, device=x.device, dtype=x.dtype)
-        v = v / v.norm()
-        proj = x @ v                                          # (N,)
-        x = x - 2.0 * proj.unsqueeze(1) * v.unsqueeze(0)    # (N, D)
-        return x
+        N = x.shape[0]
+        scale = scale_lo + (scale_hi - scale_lo) * torch.rand(1).item()
+        theta = math.radians(angle_deg)
+        cos_t = math.cos(theta) * scale
+        sin_t = math.sin(theta) * scale
+
+        # 2×3 affine matrix broadcast across all N feature maps
+        mat = torch.tensor(
+            [[cos_t, -sin_t, 0.0],
+             [sin_t,  cos_t, 0.0]],
+            dtype=x.dtype, device=x.device,
+        ).unsqueeze(0).expand(N, -1, -1)  # (N, 2, 3)
+
+        grid = F.affine_grid(mat, x.shape, align_corners=False)  # (N, H, W, 2)
+        return F.grid_sample(
+            x, grid, mode='bilinear', padding_mode='border', align_corners=False
+        )
 
     @staticmethod
-    def _simulated_low_res(
-        x: torch.Tensor,
-        grid_shape: tuple,
-        factor_range: list,
-    ) -> torch.Tensor:
-        """Downsample the 2D feature grid then upsample back (bilinear).
+    def _simulated_low_res(x: torch.Tensor, factor_range: list) -> torch.Tensor:
+        """Downsample the spatial feature maps then upsample back (bilinear).
 
-        Simulates the effect of extracting features from a lower-resolution
-        image: the coarser grid forces spatial blending of adjacent patches.
-        N is preserved so collate_fn / torch.stack is unaffected.
+        Requires ``x.dim() == 4``; returns x unchanged for flat inputs.
+        Simulates extracting features from a lower-resolution image: the
+        coarser representation forces spatial blending of neighbouring positions.
 
         Parameters
         ----------
         factor_range : [min_factor, max_factor]
             Integer downsampling factor sampled uniformly in the given range.
         """
-        H, W = grid_shape
-        N, D = x.shape
+        if x.dim() != 4:
+            return x
 
+        _, _, H, W = x.shape
         factor = random.randint(int(factor_range[0]), int(factor_range[1]))
         if factor <= 1:
             return x
@@ -248,57 +280,47 @@ class OfflineFeatureAugmentor:
         H_d = max(1, H // factor)
         W_d = max(1, W // factor)
 
-        # (N, D) → (1, D, H, W) for F.interpolate
-        x_grid = x.view(H, W, D).permute(2, 0, 1).unsqueeze(0)  # (1, D, H, W)
-        x_down = F.interpolate(
-            x_grid, size=(H_d, W_d), mode='bilinear', align_corners=False
-        )
-        x_up = F.interpolate(
-            x_down, size=(H, W), mode='bilinear', align_corners=False
-        )
-        return x_up.squeeze(0).permute(1, 2, 0).reshape(N, D)
+        x_down = F.interpolate(x, size=(H_d, W_d), mode='bilinear', align_corners=False)
+        return F.interpolate(x_down, size=(H, W), mode='bilinear', align_corners=False)
 
     @staticmethod
-    def _mirroring(x: torch.Tensor, grid_shape: tuple) -> torch.Tensor:
-        """Randomly flip the 2D patch grid along horizontal and/or vertical axes.
+    def _mirroring(x: torch.Tensor) -> torch.Tensor:
+        """Randomly flip the spatial feature maps along H and/or W.
 
+        Requires ``x.dim() == 4``; returns x unchanged for flat inputs.
         The outer probability ``p`` controls whether mirroring fires at all.
-        Conditionally on firing, each axis is independently flipped with
-        probability 0.5.  If neither axis is selected, x is returned unchanged.
+        Conditionally on firing, H and W are each flipped independently at p=0.5.
         """
-        H, W = grid_shape
-        N, D = x.shape
-
-        x_grid = x.view(H, W, D)
+        if x.dim() != 4:
+            return x
 
         axes = []
         if torch.rand(1).item() < 0.5:
-            axes.append(0)   # vertical flip
+            axes.append(2)   # flip H
         if torch.rand(1).item() < 0.5:
-            axes.append(1)   # horizontal flip
+            axes.append(3)   # flip W
 
         if axes:
-            x_grid = x_grid.flip(axes)
-
-        return x_grid.reshape(N, D)
+            x = x.flip(axes)
+        return x
 
     @staticmethod
     def _gaussian_blur(
         x: torch.Tensor,
-        grid_shape: tuple,
         kernel_size: int,
         sigma: float,
     ) -> torch.Tensor:
-        """Apply a 2D Gaussian blur over the spatial patch grid.
+        """Apply a 2D Gaussian blur over the spatial feature maps.
 
-        Uses depthwise F.conv2d (groups=D) so each feature channel is
-        smoothed independently.  The kernel is clamped to min(H, W) and
-        forced to be odd so padding = kernel_size // 2 gives exact output size.
+        Requires ``x.dim() == 4``; returns x unchanged for flat inputs.
+        Uses depthwise F.conv2d (groups=C) so each channel is blurred
+        independently.  Kernel is clamped to min(H, W) and forced odd.
         """
-        H, W = grid_shape
-        N, D = x.shape
+        if x.dim() != 4:
+            return x
 
-        # Clamp to spatial dimensions and force odd
+        _, C, H, W = x.shape
+
         ks = min(int(kernel_size), min(H, W))
         if ks % 2 == 0:
             ks -= 1
@@ -310,14 +332,10 @@ class OfflineFeatureAugmentor:
         # Separable 2D Gaussian kernel (ks, ks)
         coords = torch.arange(ks, dtype=x.dtype, device=x.device) - half
         k1d = torch.exp(-0.5 * (coords / sigma) ** 2)
-        k2d = k1d.unsqueeze(0) * k1d.unsqueeze(1)   # outer product
+        k2d = k1d.unsqueeze(0) * k1d.unsqueeze(1)
         k2d = k2d / k2d.sum()
 
-        # (N, D) → (1, D, H, W) for conv2d
-        x_grid = x.view(H, W, D).permute(2, 0, 1).unsqueeze(0)   # (1, D, H, W)
+        # Depthwise weight: (C, 1, ks, ks)
+        weight = k2d.unsqueeze(0).unsqueeze(0).expand(C, 1, ks, ks)
 
-        # Depthwise weight: (D, 1, ks, ks)
-        weight = k2d.unsqueeze(0).unsqueeze(0).expand(D, 1, ks, ks)
-
-        x_blur = F.conv2d(x_grid, weight, bias=None, padding=half, groups=D)
-        return x_blur.squeeze(0).permute(1, 2, 0).reshape(N, D)
+        return F.conv2d(x, weight, bias=None, padding=half, groups=C)

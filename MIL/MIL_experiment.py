@@ -1,6 +1,5 @@
 #external imports
 import gc
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -164,8 +163,21 @@ def _append_registry(args, metrics_data: pd.DataFrame) -> None:
         'test_auc': round(test_auc, 4) if not np.isnan(test_auc) else '',
         'output_path': str(args.output_path),
     }
-    write_header = not registry_path.exists()
-    pd.DataFrame([entry]).to_csv(registry_path, mode='a', header=write_header, index=False)
+    new_row = pd.DataFrame([entry])
+    if registry_path.exists():
+        try:
+            existing = pd.read_csv(registry_path)
+            combined = pd.concat([existing, new_row], ignore_index=True, sort=False)
+        except pd.errors.ParserError:
+            # Existing file is malformed (e.g. written by old append code with
+            # mismatched column counts) — back it up and start fresh.
+            backup = registry_path.with_suffix('.csv.bak')
+            registry_path.rename(backup)
+            print(f"Warning: corrupt registry backed up to {backup}; starting fresh.")
+            combined = new_row
+    else:
+        combined = new_row
+    combined.to_csv(registry_path, index=False)
     print(f"Registry updated: {registry_path}")
 
 
@@ -620,8 +632,6 @@ def train_loop(train_loader, valid_loader, model, training_stage_manager, train_
 
         print(f"\n-------- Epoch {epoch + 1}/{args.epochs} --------")
 
-        start_time = time.time()
-
         if training_stage_manager is not None:
             training_stage_manager(model, optimizer, epoch, optimizer.param_groups[0]['lr'])
 
@@ -636,19 +646,15 @@ def train_loop(train_loader, valid_loader, model, training_stage_manager, train_
         if hasattr(model, 'inner_scores'):
             model.inner_scores = {}
 
-        gc.collect()
-        torch.cuda.empty_cache()
+        clear_memory()
 
         # training for one epoch
         train_stats = train_fn(train_loader, model, train_criterion, optimizer, epoch, args, scheduler, scaler, device)
 
-        gc.collect()
-        torch.cuda.empty_cache()
+        clear_memory()
 
         if not skip_val:
             val_stats = valid_fn(valid_loader, model, eval_criterion, args, device, split = 'val', epoch = epoch)
-
-        elapsed = time.time() - start_time
 
         # If using multi-scale model, report scale-specific and aggregated results
         if args.multi_scale_model is not None:
@@ -793,10 +799,6 @@ def train_loop(train_loader, valid_loader, model, training_stage_manager, train_
     plot_lrs_scheduler(train_results['lr'], output_path)
     plot_loss_and_acc_curves(train_results, val_results, 'auc_roc', output_path)
 
-    # Clear GPU memory cache and garbage collect
-    torch.cuda.empty_cache()
-    gc.collect()
-    
     return best_val_stats, best_checkpoint_path
 
 def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, scaler, device):
@@ -832,13 +834,15 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
     else:
         preds = []
         probs = []
-        
-    start = time.time()
+
+    # Disable GC during the training loop to prevent mid-step collection stalls.
+    # Objects created each step (tensor views, numpy arrays) are freed by refcount;
+    # GC is only needed for reference cycles, which we collect between epochs.
+    gc.disable()
 
     # Iterate over batches
     for step, data in progress_iter:
         # Send data to device; dtype=float32 converts float16 cache tensors on the GPU
-        # (fast vectorised op) while halving DRAM reads and PCIe transfer bytes.
         if isinstance(data['x'], dict):
             inputs = {scale: tensor.to(device, dtype=torch.float32, non_blocking=True) for scale, tensor in data['x'].items()}
             batch_size = inputs[args.scales[0]].size(0)
@@ -851,40 +855,50 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
 
         labels = data['y'].float().to(device)
 
+        # Feature-space augmentation on GPU.
+        _aug = getattr(args, '_feature_augmentor', None)
+        if _aug is not None:
+            if isinstance(inputs, dict):
+                inputs = {k: _aug(v) for k, v in inputs.items()}
+            elif isinstance(inputs, list):
+                inputs = [_aug(t) for t in inputs]
+            else:
+                inputs = _aug(inputs)
+
         # Wrap forward pass with autocast
         with torch.cuda.amp.autocast(enabled=args.apex):
 
             if args.mil_type == 'pyramidal_mil':
-                if args.type_scale_aggregator in ['concatenation', 'gated-attention']:  
+                if args.type_scale_aggregator in ['concatenation', 'gated-attention']:
 
                     # Model returns logits for the scale-specific and multi-scale branches if deep supervision enabled
-                    if args.deep_supervision: 
-                        logits, side_logits = model(inputs) 
-                    else: # Model returns logits for the multi-scale branch 
-                        logits= model(inputs) 
-                    
+                    if args.deep_supervision:
+                        logits, side_logits = model(inputs)
+                    else: # Model returns logits for the multi-scale branch
+                        logits= model(inputs)
+
                     logits = logits.nan_to_num()
-                    
+
                     loss = criterion(logits.view(-1, 1), labels.view(-1, 1))
-                    
-                elif args.type_scale_aggregator in ['max_p', 'mean_p']: 
+
+                elif args.type_scale_aggregator in ['max_p', 'mean_p']:
                     side_logits = model(inputs)
-                    
-                    loss = 0.0 
-            
-            else: 
-                # single-scale mil models 
+
+                    loss = 0.0
+
+            else:
+                # single-scale mil models
                 logits = model(inputs)
 
                 loss = criterion(logits.view(-1, 1), labels.view(-1, 1))
 
-        if (args.type_scale_aggregator in ['concatenation', 'gated-attention'] and args.deep_supervision) or args.type_scale_aggregator in ['max_p', 'mean_p']: 
-            
-            for idx, side_logit in enumerate(side_logits): 
+        if (args.type_scale_aggregator in ['concatenation', 'gated-attention'] and args.deep_supervision) or args.type_scale_aggregator in ['max_p', 'mean_p']:
+
+            for idx, side_logit in enumerate(side_logits):
                 side_logit = side_logit.nan_to_num()
-                    
+
                 loss += criterion(side_logit.view(-1, 1), labels.view(-1, 1))
-        
+
         losses.update(loss.item(), batch_size)
 
         # Backprop w/ gradient scaling
@@ -907,7 +921,7 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
         # Step learning rate scheduler per batch
         scheduler.step()
 
-        targs.append(labels.cpu().numpy()) 
+        targs.append(labels.cpu().numpy())
 
         
         if args.mil_type == 'pyramidal_mil': # store predictions and probabilities for multi-scale MIL models
@@ -965,14 +979,15 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
             {
                 "lr": [optimizer.param_groups[0]['lr']],
                 "loss": f"{losses.avg:.4f}",
-                #"loss": f"{train_loss:.4f}",
-                "CUDA-Mem": f"{torch.cuda.memory_usage(device)}%",
-                "CUDA-Util": f"{torch.cuda.utilization(device)}%",
-            }
+            },
+            refresh=False,
         )
 
+    gc.enable()
+    gc.collect()
+
     train_stats = {
-        'loss': losses.avg, 
+        'loss': losses.avg,
         'lr': optimizer.param_groups[0]['lr']
     }
 
@@ -1019,7 +1034,7 @@ def valid_fn(valid_loader, model, criterion, args, device, split = 'val', epoch=
     model.eval() # Set model to evaluation mode
     model.is_training = False 
     
-    losses = AverageMeter() 
+    losses = AverageMeter()
 
     targs = []
 
@@ -1040,8 +1055,6 @@ def valid_fn(valid_loader, model, criterion, args, device, split = 'val', epoch=
         preds = []
         probs = []
             
-    start = time.time()
-
     if split == 'val': 
         progress_iter = tqdm(enumerate(valid_loader), 
                              desc=f"[{epoch + 1:03d}/{args.epochs:03d} epoch valid]",
@@ -1159,13 +1172,12 @@ def valid_fn(valid_loader, model, criterion, args, device, split = 'val', epoch=
         progress_iter.set_postfix(
             {
                 "loss": f"{losses.avg:.4f}",
-                "CUDA-Mem": f"{torch.cuda.memory_usage(device)}%",
-                "CUDA-Util": f"{torch.cuda.utilization(device)}%",
-            }
+            },
+            refresh=False,
         )
 
     val_stats = {
-        'loss': losses.avg, 
+        'loss': losses.avg,
     }
 
     targs = np.concatenate(targs)

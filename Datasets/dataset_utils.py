@@ -384,11 +384,12 @@ def MIL_dataloader(split_df, split, args):
     # Feature-space augmentor: only for offline training
     from Datasets.feature_augmentations import OfflineFeatureAugmentor
     aug_config_dict = getattr(args, 'aug_config_dict', None)
-    feature_augmentor = None
+    # Build augmentor once and store on args for GPU-side application in train_fn.
     if (split == 'train'
             and args.feature_extraction == 'offline'
-            and aug_config_dict is not None):
-        feature_augmentor = OfflineFeatureAugmentor(aug_config_dict)
+            and aug_config_dict is not None
+            and not hasattr(args, '_feature_augmentor')):
+        args._feature_augmentor = OfflineFeatureAugmentor(aug_config_dict)
 
     if args.roi_eval:
         # Use ROI-specific dataset for detection evaluation
@@ -398,7 +399,6 @@ def MIL_dataloader(split_df, split, args):
         # Standard MIL dataset (split passed so only train split preloads into cache)
         split_dataset = Generic_MIL_Dataset(
             args=args, df=split_df, transform=tfm, split=split,
-            feature_augmentor=feature_augmentor,
         )
 
     # Val/test splits load from disk (no cache); use at least 1 worker so disk I/O
@@ -434,7 +434,7 @@ def MIL_dataloader(split_df, split, args):
                 batch_size=args.batch_size,
                 sampler=sampler,
                 num_workers=args.num_workers,
-                pin_memory=args.num_workers > 0,
+                pin_memory=False,
                 drop_last=True,
                 collate_fn=collate_MIL_patches,
                 persistent_workers=args.num_workers > 0,
@@ -445,7 +445,7 @@ def MIL_dataloader(split_df, split, args):
                 batch_size=args.batch_size,
                 shuffle=True,
                 num_workers=args.num_workers,
-                pin_memory=args.num_workers > 0,
+                pin_memory=False,
                 drop_last=True,
                 collate_fn=collate_MIL_patches,
                 persistent_workers=args.num_workers > 0,

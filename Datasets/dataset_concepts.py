@@ -122,7 +122,7 @@ def collate_patch_features(batch):
     }
 
 class Generic_MIL_Dataset(Dataset):
-    def __init__(self, args, df, transform, split='train', feature_augmentor=None):
+    def __init__(self, args, df, transform, split='train'):
         self.args = args
         self.df = df
 
@@ -144,15 +144,11 @@ class Generic_MIL_Dataset(Dataset):
 
         self.multi_scale_model = args.multi_scale_model
         self.scales = args.scales
-        self.feature_augmentor = feature_augmentor
-
         # Preload training/val features into memory to avoid per-batch file I/O.
-        self._cache = None
-        self._grid_shapes = None
+        self._feat_cache = None
+        self._label_cache = None
         if split in ['train', 'val'] and self.transform is None and args.feature_extraction == 'offline':
             self._preload_features()
-            if feature_augmentor is not None:
-                self._preload_grid_shapes()
 
     def _ensure_sorted_file(self, bag_dir, feat_pyramid_level=None):
         """Return path to a pre-sorted feature file, creating it if it does not exist.
@@ -214,98 +210,86 @@ class Generic_MIL_Dataset(Dataset):
             return torch.load(sorted_path, weights_only=True)
 
     def _preload_features(self):
-        """Load all pre-extracted features into memory once at startup."""
-        print(f"Preloading {len(self.df)} samples into memory...")
-        self._cache = [None] * len(self.df)
-        for idx in range(len(self.df)):
+        """Load all pre-extracted features into contiguous stacked tensors.
+
+        Rather than storing a Python list of per-sample objects, all features
+        are copied into a small number of large pre-allocated tensors:
+
+          single-scale : _feat_cache  shape (N, P, D)           float16
+          fpn          : _feat_cache  [Tensor(N,P,C4,H,W),
+                                       Tensor(N,P,C5,H,W)]      float16
+          msp          : _feat_cache  {scale: Tensor(N,P,D)}    float16
+          all modes    : _label_cache shape (N,)                 int64
+
+        __getitem__ returns zero-copy views (tensor[idx]) so no data is copied
+        at batch time.  Replacing ~5×N Python objects with 2–4 large tensors
+        reduces the GC workload during training to near zero.
+        """
+        N = len(self.df)
+        print(f"Preloading {N} samples into memory...")
+
+        # Read first sample to determine shapes and pre-allocate stores.
+        row0 = self.df.iloc[0]
+        pid0, iid0 = str(row0['patient_id']), str(row0['image_id'])
+
+        if self.multi_scale_model is None:
+            x0 = self._load_sorted_mmap(self.dir_path / pid0 / iid0)
+            store = torch.empty(N, *x0.shape, dtype=torch.float16)
+            store[0].copy_(x0)
+            del x0
+
+        elif self.multi_scale_model == 'msp':
+            store = {}
+            for scale in self.scales:
+                x0 = self._load_sorted_mmap(
+                    self.dir_path / f'patch_size-{scale}' / pid0 / iid0)
+                store[scale] = torch.empty(N, *x0.shape, dtype=torch.float16)
+                store[scale][0].copy_(x0)
+                del x0
+
+        elif self.multi_scale_model in ['fpn', 'backbone_pyramid']:
+            c4_0 = self._load_sorted_mmap(self.dir_path / pid0 / iid0, feat_pyramid_level='C4')
+            c5_0 = self._load_sorted_mmap(self.dir_path / pid0 / iid0, feat_pyramid_level='C5')
+            store = [
+                torch.empty(N, *c4_0.shape, dtype=torch.float16),
+                torch.empty(N, *c5_0.shape, dtype=torch.float16),
+            ]
+            store[0][0].copy_(c4_0)
+            store[1][0].copy_(c5_0)
+            del c4_0, c5_0
+
+        label_store = torch.empty(N, dtype=torch.long)
+        label_store[0] = int(row0[self.label])
+
+        # Fill remaining samples.
+        for idx in range(1, N):
             row = self.df.iloc[idx]
-            patient_id = str(row['patient_id'])
-            image_id = str(row['image_id'])
+            pid, iid = str(row['patient_id']), str(row['image_id'])
 
             if self.multi_scale_model is None:
-                bag_dir = self.dir_path / patient_id / image_id
-                x = self._load_sorted_mmap(bag_dir)
+                store[idx].copy_(self._load_sorted_mmap(self.dir_path / pid / iid))
 
             elif self.multi_scale_model == 'msp':
-                x = {}
                 for scale in self.scales:
-                    bag_dir = self.dir_path / f'patch_size-{scale}' / patient_id / image_id
-                    x[scale] = self._load_sorted_mmap(bag_dir)
+                    store[scale][idx].copy_(
+                        self._load_sorted_mmap(
+                            self.dir_path / f'patch_size-{scale}' / pid / iid))
 
             elif self.multi_scale_model in ['fpn', 'backbone_pyramid']:
-                bag_dir = self.dir_path / patient_id / image_id
-                c4 = self._load_sorted_mmap(bag_dir, feat_pyramid_level='C4')
-                c5 = self._load_sorted_mmap(bag_dir, feat_pyramid_level='C5')
-                x = [c4, c5]
+                store[0][idx].copy_(
+                    self._load_sorted_mmap(self.dir_path / pid / iid, feat_pyramid_level='C4'))
+                store[1][idx].copy_(
+                    self._load_sorted_mmap(self.dir_path / pid / iid, feat_pyramid_level='C5'))
 
-            label = torch.tensor(row[self.label], dtype=torch.long)
-            self._cache[idx] = (x, label)
+            label_store[idx] = int(row[self.label])
 
             if (idx + 1) % 2000 == 0:
-                print(f"  Preloaded {idx + 1}/{len(self.df)} samples")
+                print(f"  Preloaded {idx + 1}/{N} samples")
 
-        print(f"Preloading complete ({len(self.df)} samples)")
-        # Freeze all preloaded objects so Python's GC never scans them again.
-        # Without this, Gen2 GC cycles scan all ~2×N tensor objects each time,
-        # and get progressively slower as optimizer state grows into old generations.
-        import gc as _gc
-        _gc.collect()
-        _gc.freeze()
+        self._feat_cache = store
+        self._label_cache = label_store
 
-    def _preload_grid_shapes(self):
-        """Load the 2D spatial grid dimensions (H, W) for each bag.
-
-        Required by spatially-aware augmentations (simulated_low_res,
-        mirroring, gaussian_blur).  Patches are sorted row-major (y then x),
-        so the grid is reconstructed as x.view(H, W, D).
-
-        The structure of _grid_shapes[idx] mirrors the structure of
-        _cache[idx][0]:
-          - single-scale : (H, W) tuple
-          - msp          : {scale: (H, W)} dict
-          - fpn          : [(H, W), (H, W)] list  (C4 and C5 share coords)
-        """
-        print(f"Preloading grid shapes for {len(self.df)} samples...")
-        self._grid_shapes = [None] * len(self.df)
-
-        for idx in range(len(self.df)):
-            row = self.df.iloc[idx]
-            patient_id = str(row['patient_id'])
-            image_id = str(row['image_id'])
-
-            if self.multi_scale_model is None:
-                coords_path = self.dir_path / patient_id / image_id / 'info_patches.h5'
-                with h5py.File(coords_path, 'r') as _f:
-                    bag_coords = np.array(_f['coords'])
-                n_rows = len(np.unique(bag_coords[:, 1]))
-                n_cols = len(np.unique(bag_coords[:, 0]))
-                self._grid_shapes[idx] = (n_rows, n_cols)
-
-            elif self.multi_scale_model == 'msp':
-                # Each scale has its own patch grid (larger patches → smaller grid)
-                grid_shape = {}
-                for scale in self.scales:
-                    coords_path = (
-                        self.dir_path / f'patch_size-{scale}' / patient_id / image_id
-                        / 'info_patches.h5'
-                    )
-                    with h5py.File(coords_path, 'r') as _f:
-                        bag_coords = np.array(_f['coords'])
-                    n_rows = len(np.unique(bag_coords[:, 1]))
-                    n_cols = len(np.unique(bag_coords[:, 0]))
-                    grid_shape[scale] = (n_rows, n_cols)
-                self._grid_shapes[idx] = grid_shape
-
-            elif self.multi_scale_model in ['fpn', 'backbone_pyramid']:
-                # C4 and C5 share the same info_patches.h5
-                coords_path = self.dir_path / patient_id / image_id / 'info_patches.h5'
-                with h5py.File(coords_path, 'r') as _f:
-                    bag_coords = np.array(_f['coords'])
-                n_rows = len(np.unique(bag_coords[:, 1]))
-                n_cols = len(np.unique(bag_coords[:, 0]))
-                self._grid_shapes[idx] = [(n_rows, n_cols), (n_rows, n_cols)]
-
-        print(f"Grid shape preloading complete ({len(self.df)} samples)")
+        print(f"Preloading complete ({N} samples)")
         import gc as _gc
         _gc.collect()
         _gc.freeze()
@@ -371,13 +355,14 @@ class Generic_MIL_Dataset(Dataset):
     def __getitem__(self, idx):
 
         # Fast path: return preloaded features
-        if self._cache is not None:
-            x, label = self._cache[idx]
-            if self.feature_augmentor is not None:
-                x = self.feature_augmentor(
-                    x,
-                    grid_shape=self._grid_shapes[idx] if self._grid_shapes is not None else None,
-                )
+        if self._feat_cache is not None:
+            if isinstance(self._feat_cache, torch.Tensor):
+                x = self._feat_cache[idx]               # zero-copy view (P, D)
+            elif isinstance(self._feat_cache, list):
+                x = [t[idx] for t in self._feat_cache]  # list of views
+            else:  # dict (msp)
+                x = {k: v[idx] for k, v in self._feat_cache.items()}
+            label = self._label_cache[idx]
             return {'x': x, 'y': label}
 
         data = self.df.iloc[idx]
