@@ -56,13 +56,17 @@ def build_model(args):
                     # General self-attention based args 
                     drop_mha=args.drop_mha if args.type_mil_encoder in ['isab', 'sab'] else None, 
                     trans_layer_norm=args.trans_layer_norm if args.type_mil_encoder in ['isab', 'sab'] else None
+                    # Inject noise into instances before bag aggregation
+                    instance_noise_sigma=getattr(args, 'instance_noise_sigma', None),
+                    instance_noise_p=getattr(args, 'instance_noise_p', 0.0),
+                    instance_noise_type=getattr(args, 'instance_noise_type', None)
                    )
 
     # instantiate MIL Model
     if args.mil_type == 'embedding': # single-scale patch-based mil models 
         model = EmbeddingMIL(mil_type = args.mil_type, 
                              num_inst = [math.ceil(args.img_size[0]/s) * math.ceil(args.img_size[1]/s) for s in args.scales], # number of instances (patches) per image 
-                             mil_args = mil_args)
+                             **mil_args)
         
     elif args.mil_type == 'pyramidal_mil':
 
@@ -79,7 +83,7 @@ def build_model(args):
                 deep_supervision = args.deep_supervision, 
                 scales = args.scales, 
                 num_inst = num_inst,
-                mil_args = mil_args
+                **mil_args
             )
             
         else: # convetional MIL formulation (globally group and aggregate all instances under the same bag for each scale) 
@@ -97,7 +101,7 @@ def build_model(args):
                 args.deep_supervision, 
                 args.scales, 
                 num_inst = num_inst,
-                mil_args = mil_args
+                **mil_args  # type: ignore
             )
 
     return model 

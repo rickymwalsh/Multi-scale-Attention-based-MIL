@@ -176,7 +176,10 @@ class MIL(nn.Module):
                 drop_attention_pool: float = 0.0, 
                 pma_num_heads: int = 1,  
                 drop_mha: float = 0.0, 
-                trans_layer_norm: bool = False) -> None:
+                trans_layer_norm: bool = False,
+                instance_noise_sigma: Optional[Union[float, Tuple[float, float]]] = None,
+                instance_noise_p: float = 0.0,
+                instance_noise_type: str = 'global') -> None:
     
         super().__init__()
         
@@ -202,6 +205,9 @@ class MIL(nn.Module):
         self.pma_num_heads = pma_num_heads 
         self.drop_mha = drop_mha
         self.trans_layer_norm = trans_layer_norm
+        self.instance_noise_sigma = instance_noise_sigma
+        self.instance_noise_p = instance_noise_p
+        self.instance_noise_type = instance_noise_type
 
         self.is_training = is_training
 
@@ -282,17 +288,43 @@ class MIL(nn.Module):
         
         return aggregator
 
+    def apply_instance_noise(self, x):
+        def get_sigma(input_sigma, shp=None):
+            if isinstance(input_sigma, (float, int)):
+                return input_sigma
+            elif isinstance(input_sigma, (tuple, list)) and shp is not None:
+                low, high = input_sigma 
+                return torch.FloatTensor(*shp).uniform_(low, high).to(x.device)
+            else:
+                raise ValueError("instance_noise_sigma must be a float or a tuple of (low, high) for uniform distribution, and output shape must be provided for the latter case.")
+
+        if self.is_training and self.instance_noise_p > 0.0 and self.instance_noise_sigma is not None:
+            if self.instance_noise_type == 'global':
+                sigma = get_sigma(self.instance_noise_sigma, shp=(1,))
+                noise = torch.randn_like(x) * sigma
+
+            elif self.instance_noise_type == 'instance-specific':
+                assert x.dim() == 3, "For instance-specific noise, input tensor x must have shape (batch_size, num_instances, feature_dim)"
+                sigma = get_sigma(self.instance_noise_sigma, shp=(x.size(0), x.size(1), 1))
+
+                noise = torch.randn_like(x) * sigma
+
+            x = x + noise
+        return x
+
+
+    
+
 class EmbeddingMIL(MIL):
     
-    def __init__(self, mil_type: str = "embedding", num_inst = None, mil_args = None) -> None:
+    def __init__(self, mil_type: str = "embedding", num_inst = None, **kwargs) -> None:
         
         self.mil_type = mil_type.lower()
         self.num_inst = num_inst 
-        mil_args = mil_args if mil_args is not None else {}
         
         self.patch_scores = None 
         
-        super().__init__(**mil_args)
+        super().__init__(**kwargs)
         
     def save_patch_scores(self, A):
         """Save patch-level scores attention weights."""
@@ -349,13 +381,12 @@ class PyramidalMILmodel(MIL):
                  deep_supervision, 
                  scales, 
                  num_inst = None, 
-                 mil_args = None) -> None:
+                 **kwargs) -> None:
         
         self.mil_type = 'embedding'
         self.num_inst = num_inst 
-        mil_args = mil_args if mil_args is not None else {}
         
-        super().__init__(**mil_args)
+        super().__init__(**kwargs)
 
         self.type_scale_aggregator = type_scale_aggregator
         self.deep_supervision = deep_supervision 
@@ -382,11 +413,11 @@ class PyramidalMILmodel(MIL):
                 self.classifier = head(self.fcl_encoder_dim, self.num_classes, self.sigmoid_func, self.drop_classhead) 
 
         elif self.type_scale_aggregator in ['max_p', 'mean_p']:
-            
+
             self.side_classifiers = nn.ModuleDict({f'classifier_{scale}': head(self.fcl_encoder_dim, self.num_classes, self.sigmoid_func, self.drop_classhead) for scale in self.scales})
 
         self.patch_scores = {}
-        self.scale_scores = None 
+        self.scale_scores = None
 
         self.bag_embed = {}
         self.inst_embed = {}
@@ -495,6 +526,9 @@ class PyramidalMILmodel(MIL):
                     x_patches = block_encoder(x_patches, bag_mask)
                 else: 
                     x_patches = block_encoder(x_patches)
+
+            # Apply noise to the instance embeddings directly before bag aggregation
+            x_patches = self.apply_instance_noise(x_patches)
                                         
             # Apply the scale-specific aggregator to the encoded output to obtain the bag representation: 
             # (Batch_size, N, embedding_size) -> (Batch_size, embedding_size)
@@ -556,7 +590,7 @@ class NestedPyramidalMILmodel(MIL):
                  deep_supervision, 
                  scales, 
                  num_inst = None, 
-                 mil_args = None) -> None:
+                 **kwargs) -> None:
 
         """
         Initialize the Nested Pyramidal Multiple Instance Learning (MIL) model.
@@ -568,14 +602,12 @@ class NestedPyramidalMILmodel(MIL):
             deep_supervision (bool): Whether to apply supervision at each scale.
             scales (List[int]): The scales used for multi-scale analysis 
             num_inst (int, optional): Number of instances per bag
-            mil_args (dict, optional): Additional MIL arguments passed to the superclass.
         """
         
         self.mil_type = 'embedding'
         self.num_inst = num_inst 
-        mil_args = mil_args if mil_args is not None else {}
         
-        super().__init__(**mil_args)
+        super().__init__(**kwargs)
         
         self.type_scale_aggregator = type_scale_aggregator
         self.deep_supervision = deep_supervision 

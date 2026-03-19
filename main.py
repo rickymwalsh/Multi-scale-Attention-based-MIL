@@ -177,6 +177,9 @@ def config():
     parser.add_argument('--num_encoder_blocks', type=int, default=2, help='parameter for set transformer (number of encoder layers)')
     parser.add_argument('--trans_num_inds', type=int, default=20, help='parameter for set transformer (number of inducing points for the ISAB)')
     parser.add_argument('--trans_layer_norm', type=bool, default=False)
+    parser.add_argument('--instance_noise_sigma', type=float, default=None, nargs='+', help='Standard deviation of Gaussian noise to inject into instance features before bag aggregation, or two values (low and high) for uniform sampling of the noise sigma. If None, no noise is injected.')
+    parser.add_argument('--instance_noise_p', type=float, default=0.0, help='Probability of injecting noise into instance features before bag aggregation (default: 0, no noise).')
+    parser.add_argument('--instance_noise_type', type=str, default=None, choices=['global', 'instance-specific'], help='Whether to use the same noise distribution for all instances in a bag (global) or different noise for each instance (instance-specific). Ignored if instance_noise_sigma is None or instance_noise_p is 0.')
 
     #Multi-scale MIL
     parser.add_argument('--multi_scale_model', type=str, choices = ['fpn', 'backbone_pyramid', 'msp'], default = None) 
