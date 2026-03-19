@@ -115,18 +115,13 @@ class OfflineFeatureAugmentor:
         if isinstance(x, torch.Tensor):
             return self._augment_tensor(x)
         elif isinstance(x, dict):
-            # Pre-roll the gaussian_noise coin once so all scales share the
-            # same application decision, then pass per-scale config overrides.
-            noise_fires = (
-                'gaussian_noise' in self.cfg
-                and torch.rand(1).item() < self.cfg['gaussian_noise']['p']
-            )
             return {
-                k: self._augment_tensor(v, scale_key=k, noise_fires=noise_fires)
-                for k, v in x.items()
+                k: self._augment_tensor(v) for k, v in x.items()
             }
         elif isinstance(x, list):
-            return [self._augment_tensor(t) for t in x]
+            # Assumes that list inputs are ordered by scale x[0] = C4 and x[1] = C5
+            scale_keys = ['C4', 'C5'] if len(x) == 2 else [None] * len(x)
+            return [self._augment_tensor(t, scale_key=scale_key) for t, scale_key in zip(x, scale_keys)]
         else:
             raise TypeError(
                 f"OfflineFeatureAugmentor: unsupported x type {type(x)}"
@@ -141,7 +136,6 @@ class OfflineFeatureAugmentor:
         x: torch.Tensor,
         *,
         scale_key: str | None = None,
-        noise_fires: bool | None = None,
     ) -> torch.Tensor:
         orig_dtype = x.dtype
         # Cast to float32: always creates a NEW tensor (safe to mutate),
@@ -151,13 +145,8 @@ class OfflineFeatureAugmentor:
         cfg = self.cfg
 
         if 'gaussian_noise' in cfg:
-            # When called from the dict branch, the coin has already been
-            # rolled (noise_fires is True/False).  Otherwise roll it here.
-            fires = noise_fires if noise_fires is not None else (
-                torch.rand(1).item() < cfg['gaussian_noise']['p']
-            )
-            if fires:
-                noise_cfg = cfg['gaussian_noise']
+            noise_cfg = cfg['gaussian_noise']
+            if torch.rand(1).item() < noise_cfg['p']:
                 # Merge per-scale overrides when a scale key is given.
                 per_scale = noise_cfg.get('per_scale', {})
                 if scale_key is not None and scale_key in per_scale:
