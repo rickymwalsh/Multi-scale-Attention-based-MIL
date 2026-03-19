@@ -55,7 +55,7 @@ def build_model(args):
                     pma_num_heads = args.pma_num_heads if args.pooling_type == 'pma' else None, 
                     # General self-attention based args 
                     drop_mha=args.drop_mha if args.type_mil_encoder in ['isab', 'sab'] else None, 
-                    trans_layer_norm=args.trans_layer_norm if args.type_mil_encoder in ['isab', 'sab'] else None
+                    trans_layer_norm=args.trans_layer_norm if args.type_mil_encoder in ['isab', 'sab'] else None,
                     # Inject noise into instances before bag aggregation
                     instance_noise_sigma=getattr(args, 'instance_noise_sigma', None),
                     instance_noise_p=getattr(args, 'instance_noise_p', 0.0),

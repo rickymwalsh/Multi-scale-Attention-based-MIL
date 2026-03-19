@@ -21,7 +21,7 @@ python main.py \
   --epochs 30 \
   --batch-size 8 \
   --eval_scheme 'kruns_train+val+test' \
-  --n_runs 3 \
+  --n_runs 1 \
   --lr 5.0e-5 \
   --weighted-BCE 'y' \
   --mil_type 'pyramidal_mil' \
@@ -36,5 +36,6 @@ python main.py \
   --scales 16 32 128 \
   --device cuda:$gpu_id \
   --num-workers 0 \
-  --final_pooling 'pool4' \
-  --weight-decay 1e-1
+  --instance_noise_sigma 10 \
+  --instance_noise_p 1.0 \
+  --instance_noise_type global

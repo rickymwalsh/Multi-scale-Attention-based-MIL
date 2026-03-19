@@ -205,9 +205,12 @@ class MIL(nn.Module):
         self.pma_num_heads = pma_num_heads 
         self.drop_mha = drop_mha
         self.trans_layer_norm = trans_layer_norm
+        # Instance noise parameters
         self.instance_noise_sigma = instance_noise_sigma
         self.instance_noise_p = instance_noise_p
         self.instance_noise_type = instance_noise_type
+        if instance_noise_p > 0.0 and instance_noise_sigma is not None:
+            self.bn_prenoise = nn.BatchNorm1d(fcl_encoder_dim)
 
         self.is_training = is_training
 
@@ -293,8 +296,13 @@ class MIL(nn.Module):
             if isinstance(input_sigma, (float, int)):
                 return input_sigma
             elif isinstance(input_sigma, (tuple, list)) and shp is not None:
-                low, high = input_sigma 
-                return torch.FloatTensor(*shp).uniform_(low, high).to(x.device)
+                if len(input_sigma) == 1:
+                    return input_sigma[0]
+                elif len(input_sigma) == 2:
+                    low, high = input_sigma 
+                    return torch.FloatTensor(*shp).uniform_(low, high).to(x.device)
+                else:    
+                    raise ValueError("instance_noise_sigma tuple must have exactly two elements (low, high) for uniform distribution.")
             else:
                 raise ValueError("instance_noise_sigma must be a float or a tuple of (low, high) for uniform distribution, and output shape must be provided for the latter case.")
 
@@ -309,6 +317,7 @@ class MIL(nn.Module):
 
                 noise = torch.randn_like(x) * sigma
 
+            x = self.bn_prenoise(x.view(-1, x.size(-1))).view_as(x)  # Apply batchnorm before adding noise to ensure consistent feature scaling
             x = x + noise
         return x
 
