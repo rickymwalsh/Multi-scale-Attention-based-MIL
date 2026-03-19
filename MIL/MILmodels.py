@@ -210,7 +210,10 @@ class MIL(nn.Module):
         self.instance_noise_p = instance_noise_p
         self.instance_noise_type = instance_noise_type
         if instance_noise_p > 0.0 and instance_noise_sigma is not None:
-            self.bn_prenoise = nn.BatchNorm1d(fcl_encoder_dim)
+            if getattr(self, 'num_inst', None) is None:
+                self.bn_prenoise = nn.ModuleDict({scale: nn.BatchNorm1d(fcl_encoder_dim) for scale in self.scales})  # type: ignore
+            else:
+                self.bn_prenoise = nn.BatchNorm1d(fcl_encoder_dim)
 
         self.is_training = is_training
 
@@ -291,7 +294,7 @@ class MIL(nn.Module):
         
         return aggregator
 
-    def apply_instance_noise(self, x):
+    def apply_instance_noise(self, x, scale=None):
         def get_sigma(input_sigma, shp=None):
             if isinstance(input_sigma, (float, int)):
                 return input_sigma
@@ -306,19 +309,29 @@ class MIL(nn.Module):
             else:
                 raise ValueError("instance_noise_sigma must be a float or a tuple of (low, high) for uniform distribution, and output shape must be provided for the latter case.")
 
-        if self.is_training and self.instance_noise_p > 0.0 and self.instance_noise_sigma is not None:
-            if self.instance_noise_type == 'global':
-                sigma = get_sigma(self.instance_noise_sigma, shp=(1,))
-                noise = torch.randn_like(x) * sigma
+        if self.instance_noise_p > 0.0 and self.instance_noise_sigma is not None:
+            if scale is not None and isinstance(self.bn_prenoise, nn.ModuleDict):
+                x = self.bn_prenoise[scale](x.view(-1, x.size(-1))).view_as(x)  # Apply batchnorm before adding noise to ensure consistent feature scaling
+            elif isinstance(self.bn_prenoise, nn.BatchNorm1d):
+                x = self.bn_prenoise(x.view(-1, x.size(-1))).view_as(x)  # Apply batchnorm before adding noise to ensure consistent feature scaling
+            else:
+                raise ValueError("BatchNorm layer for pre-noise scaling is not properly defined.")
 
-            elif self.instance_noise_type == 'instance-specific':
-                assert x.dim() == 3, "For instance-specific noise, input tensor x must have shape (batch_size, num_instances, feature_dim)"
-                sigma = get_sigma(self.instance_noise_sigma, shp=(x.size(0), x.size(1), 1))
+            if self.is_training:
+                if self.instance_noise_type == 'global':
+                    sigma = get_sigma(self.instance_noise_sigma, shp=(1,))
+                    noise = torch.randn_like(x) * sigma
 
-                noise = torch.randn_like(x) * sigma
+                elif self.instance_noise_type == 'instance-specific':
+                    assert x.dim() == 3, "For instance-specific noise, input tensor x must have shape (batch_size, num_instances, feature_dim)"
+                    sigma = get_sigma(self.instance_noise_sigma, shp=(x.size(0), x.size(1), 1))
 
-            x = self.bn_prenoise(x.view(-1, x.size(-1))).view_as(x)  # Apply batchnorm before adding noise to ensure consistent feature scaling
-            x = x + noise
+                    noise = torch.randn_like(x) * sigma
+                else: 
+                    raise ValueError(f"Invalid instance_noise_type: {self.instance_noise_type}. Must be 'global' or 'instance-specific'.")
+
+                x = x + noise
+
         return x
 
 
@@ -394,12 +407,12 @@ class PyramidalMILmodel(MIL):
         
         self.mil_type = 'embedding'
         self.num_inst = num_inst 
+        self.scales = scales
         
         super().__init__(**kwargs)
 
         self.type_scale_aggregator = type_scale_aggregator
         self.deep_supervision = deep_supervision 
-        self.scales = scales
 
         # scale-specific encoders and aggregators
         self.side_inst_aggregator = nn.ModuleDict({
@@ -537,7 +550,7 @@ class PyramidalMILmodel(MIL):
                     x_patches = block_encoder(x_patches)
 
             # Apply noise to the instance embeddings directly before bag aggregation
-            x_patches = self.apply_instance_noise(x_patches)
+            x_patches = self.apply_instance_noise(x_patches, scale)
                                         
             # Apply the scale-specific aggregator to the encoded output to obtain the bag representation: 
             # (Batch_size, N, embedding_size) -> (Batch_size, embedding_size)
