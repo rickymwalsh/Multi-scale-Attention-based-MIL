@@ -6,6 +6,9 @@ if [ -z "$gpu_id" ]; then
   gpu_id=0
 fi
 
+#--weighted-BCE 'y' \
+  # --balanced-dataloader 'y' \
+
 python main.py \
   --train \
   --label "Mass" \
@@ -19,11 +22,11 @@ python main.py \
   --dataset 'ViNDr' \
   --feature_extraction "offline" \
   --epochs 30 \
-  --batch-size 8 \
+  --batch-size 32 \
   --eval_scheme 'kruns_train+val+test' \
   --n_runs 1 \
-  --lr 5.0e-5 \
   --weighted-BCE 'y' \
+  --lr 5.0e-5 \
   --mil_type 'pyramidal_mil' \
   --multi_scale_model 'fpn' \
   --fpn_dim 256 \
@@ -36,6 +39,6 @@ python main.py \
   --scales 16 32 128 \
   --device cuda:$gpu_id \
   --num-workers 0 \
-  --instance_noise_sigma 10 \
+  --instance_noise_sigma 10.0 \
   --instance_noise_p 1.0 \
   --instance_noise_type global

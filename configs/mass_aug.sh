@@ -9,6 +9,9 @@ if [ -z "$gpu_id" ]; then
   gpu_id=0
 fi
 
+#--weighted-BCE 'y' \
+  # --balanced-dataloader 'y' \
+
 .venv/bin/python3 main.py \
   --train \
   --label "Mass" \
@@ -26,7 +29,7 @@ fi
   --eval_scheme 'kruns_train+val+test' \
   --n_runs 1 \
   --lr 5.0e-5 \
-  --balanced-dataloader 'y' \
+  --weighted-BCE 'y' \
   --mil_type 'pyramidal_mil' \
   --multi_scale_model 'fpn' \
   --fpn_dim 256 \
@@ -38,5 +41,5 @@ fi
   --deep_supervision \
   --scales 16 32 128 \
   --device cuda:$gpu_id \
-  --num-workers 8 \
+  --num-workers 0 \
   --aug_config $aug_config

@@ -126,6 +126,7 @@ def config():
 
     parser.add_argument('--train', action='store_true', default=False, help='Training mode.')
     parser.add_argument('--skip_val', action='store_true', default=False, help='Skip validation each epoch (diagnostic use only).')
+    parser.add_argument('--save_features_every_n_epochs', type=int, default=0, help='Save encoded bag instance features every N training epochs for separability analysis (0 = disabled).')
     parser.add_argument('--evaluation', action='store_true', default=False, help='Evaluation mode.')
     parser.add_argument('--eval_set', default='test', choices = ['val', 'test'], type=str, help="")
     

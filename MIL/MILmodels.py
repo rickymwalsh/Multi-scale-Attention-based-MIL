@@ -3,6 +3,7 @@ from .AttentionModels import *
 
 # external imports 
 from collections import OrderedDict
+from pathlib import Path
 
 import torch
 from torch import Tensor
@@ -440,6 +441,11 @@ class PyramidalMILmodel(MIL):
 
         self.patch_scores = {}
         self.scale_scores = None
+        self.example_output_dir = Path("results_debug/examples")
+        self.save_features_every_n_epochs = 0  # 0 = disabled; set to N to save features every N epochs
+        self._feat_collect_epoch = None        # epoch currently being accumulated
+        self._feat_collect_bags = {}           # {cls_int: {scale_key: [tensor, ...]}}
+        self.examples_file_path = None
 
         self.bag_embed = {}
         self.inst_embed = {}
@@ -537,6 +543,27 @@ class PyramidalMILmodel(MIL):
 
         elif self.type_scale_aggregator in ['max_p', 'mean_p']:
             deep_spv_outputs = [] 
+
+        # Determine whether to accumulate bag features this forward pass
+        _save_every = getattr(self, 'save_features_every_n_epochs', 0)
+        _cur_epoch = getattr(self, 'epoch', None)
+        collecting = _save_every > 0 and _cur_epoch is not None and (_cur_epoch % _save_every == 0)
+
+        # Reset accumulation buffers when the epoch changes
+        if collecting and self._feat_collect_epoch != _cur_epoch:
+            self._feat_collect_epoch = _cur_epoch
+            self._feat_collect_bags = {}
+
+        # Build per-class bag indices for this batch
+        bag_indices_by_class: dict = {}
+        if collecting:
+            current_labels = getattr(self, 'current_batch_labels', None)
+            if current_labels is not None:
+                labels_bin = (current_labels.view(-1) >= 0.5).long()
+                for cls in [0, 1]:
+                    idx = torch.where(labels_bin == cls)[0]
+                    if idx.numel() > 0:
+                        bag_indices_by_class[cls] = idx
             
         for scale in self.scales: 
                 
@@ -548,6 +575,14 @@ class PyramidalMILmodel(MIL):
                     x_patches = block_encoder(x_patches, bag_mask)
                 else: 
                     x_patches = block_encoder(x_patches)
+
+            # Accumulate instance embeddings for feature separability analysis
+            if collecting and bag_indices_by_class:
+                scale_key = str(scale)
+                for cls, idx in bag_indices_by_class.items():
+                    selected = x_patches.index_select(0, idx.to(x_patches.device)).detach().cpu()
+                    self._feat_collect_bags.setdefault(cls, {}).setdefault(scale_key, []).append(selected)
+
 
             # Apply noise to the instance embeddings directly before bag aggregation
             x_patches = self.apply_instance_noise(x_patches, scale)
@@ -603,7 +638,68 @@ class PyramidalMILmodel(MIL):
             return x.squeeze(1)
 
         return deep_spv_outputs # (Batch_size)
-        
+
+    def save_collected_features(self, epoch: int | None = None) -> str | None:
+        """Save accumulated per-epoch bag features to disk and reset the collector.
+
+        Call this once at the end of each training epoch.  Returns the saved file
+        path, or None if nothing was collected (e.g. feature saving is disabled or
+        both classes were not seen).
+        """
+        if not self._feat_collect_bags:
+            return None
+        if 0 not in self._feat_collect_bags or 1 not in self._feat_collect_bags:
+            return None
+
+        epoch_val = epoch if epoch is not None else int(self._feat_collect_epoch or 0)
+
+        examples: dict = {}
+        labels_list: list[float] = []
+
+        for scale in self.scales:
+            scale_key = str(scale)
+            per_class = []
+            valid = True
+            for cls in [0, 1]:
+                chunks = self._feat_collect_bags.get(cls, {}).get(scale_key, [])
+                if not chunks:
+                    valid = False
+                    break
+                per_class.append(torch.cat(chunks, dim=0))
+            if not valid:
+                continue
+            examples[scale_key] = torch.cat(per_class, dim=0)
+            if not labels_list:
+                n_neg = per_class[0].size(0)
+                n_pos = per_class[1].size(0)
+                labels_list = [0.0] * n_neg + [1.0] * n_pos
+
+        if not examples:
+            return None
+
+        labels_tensor = torch.tensor(labels_list, dtype=torch.float32)
+        output_dir = Path(self.example_output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        n_neg = int((labels_tensor == 0).sum())
+        n_pos = int((labels_tensor == 1).sum())
+        examples_path = output_dir / f"epoch_{epoch_val:03d}_neg{n_neg}_pos{n_pos}_encoded_instances.pt"
+
+        torch.save(
+            {
+                'epoch': epoch_val,
+                'scales': list(self.scales),
+                'labels': labels_tensor,
+                'examples': examples,
+            },
+            examples_path,
+        )
+
+        self.examples_file_path = str(examples_path)
+        # Reset for the next collection window
+        self._feat_collect_bags = {}
+        self._feat_collect_epoch = None
+        return str(examples_path)
+
 class NestedPyramidalMILmodel(MIL):
     def __init__(self, 
                  type_scale_aggregator, 

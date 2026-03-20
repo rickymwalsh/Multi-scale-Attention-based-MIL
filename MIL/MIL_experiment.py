@@ -623,12 +623,15 @@ def train_loop(train_loader, valid_loader, model, training_stage_manager, train_
     best_val_stats = None
     best_checkpoint_path = None
     skip_val = getattr(args, 'skip_val', False)
+    model.example_output_dir = output_path / 'examples'
+    model.save_features_every_n_epochs = int(getattr(args, 'save_features_every_n_epochs', 0))
 
     # Dictionaries to keep track of training and validation metrics per epoch
     train_results = {'loss': [], 'f1': [], 'bacc': [], 'auc_roc':[], 'lr':[]}
     val_results = {'loss': [], 'f1': [], 'bacc': [], 'auc_roc':[]}
 
     for epoch in range(args.epochs):
+        model.epoch = epoch + 1
 
         print(f"\n-------- Epoch {epoch + 1}/{args.epochs} --------")
 
@@ -650,6 +653,12 @@ def train_loop(train_loader, valid_loader, model, training_stage_manager, train_
 
         # training for one epoch
         train_stats = train_fn(train_loader, model, train_criterion, optimizer, epoch, args, scheduler, scaler, device)
+
+        # Save accumulated bag features for feature separability analysis
+        if hasattr(model, 'save_collected_features') and getattr(model, 'save_features_every_n_epochs', 0) > 0:
+            saved_path = model.save_collected_features(epoch + 1)
+            if saved_path:
+                print(f"  Saved bag features → {saved_path}")
 
         clear_memory()
 
@@ -854,6 +863,7 @@ def train_fn(train_loader, model, criterion, optimizer, epoch, args, scheduler, 
             batch_size = inputs.size(0)
 
         labels = data['y'].float().to(device)
+        model.current_batch_labels = labels.detach()
 
         # Feature-space augmentation on GPU.
         _aug = getattr(args, '_feature_augmentor', None)
@@ -1075,6 +1085,7 @@ def valid_fn(valid_loader, model, criterion, args, device, split = 'val', epoch=
             batch_size = inputs.size(0)
 
         labels = data['y'].float().to(device)
+        model.current_batch_labels = labels.detach()
         
         # Wrap forward pass with autocast
         with torch.cuda.amp.autocast(enabled=args.apex):
